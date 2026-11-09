@@ -14,9 +14,9 @@ backend on the specified Windows 11 system. The evaluation covers native build
 integrity, bridge operation, AP startup, station management, WPA key lifecycle,
 RADIUS/EAP control paths, and OTA client interoperability.
 
-The build is functional for the experimentally verified laboratory scope. The
-most recent local regression contains 166 passing tests. Controlled OTA tests
-verified WPA2-Personal, WPA3-SAE, PMF/BIP, FT-SAE, FT-SAE-EXT-KEY, EAP-TLS,
+The build is functional for the experimentally verified laboratory scope.
+Earlier executable revisions completed controlled OTA tests for
+WPA2-Personal, WPA3-SAE, PMF/BIP, FT-SAE, FT-SAE-EXT-KEY, EAP-TLS,
 EAP-MSCHAPv2, EAP-PSK, EAP-SAKE, EAP-PAX, EAP-GPSK, EAP-GPSK-SHA256, EAP-PWD,
 EAP-SIM, EAP-AKA, EAP-AKA', PEAPv1/MSCHAPv2,
 EAP-TTLS/MSCHAPv2, EAP-FAST/MSCHAPv2, EAP-TEAP/MSCHAPv2, EAP-EKE, and
@@ -25,14 +25,14 @@ establish complete production hostapd parity. Ethernet, VLAN, FT-over-DS/RRB,
 hardware station offload, hardware key offload, and production radio timing
 are not included in the acceptance claim.
 
-An external Ubuntu 26.04.1 LTS client using an AWUS036ACHM completed OTA
-interoperability runs for WPA2-Personal/CCMP, WPA2-Personal with required
-PMF/BIP-CMAC-128, and WPA3-SAE/H2E group 19. The three runs completed 6, 4,
-and 4 client connections respectively, including 5, 3, and 3 controlled
-reconnects. The WPA2 baseline remained connected for 183.8 seconds after its
-final reconnect. All six WPA3-SAE/H2E stability samples remained connected
-over a 50-second observation window. The AP smoke runner automatically armed
-active-monitor link acknowledgements in each run.
+An external Ubuntu 26.04.1 LTS client using an AWUS036ACHM completed one
+association in each of three smoke profiles on the freshly rebuilt v0.1
+binary: WPA2-Personal/CCMP, WPA2 with required PMF/BIP-CMAC-128, and
+WPA3-SAE/H2E group 19. Each client reached `wpa_state=COMPLETED`. The longer
+campaign with 5, 3, and 3 controlled reconnects and the 183.8-second WPA2
+connected interval used the preceding hostapd binary. The v0.1 smoke runs do
+not establish that the longer stability results reproduce on the release
+binary.
 
 The integrated Windows WLAN client completed one cached-SSID diagnostic
 association. A separate six-radio fresh-SSID matrix produced 0/6 discoveries
@@ -94,7 +94,8 @@ report.
 
 ## 4. Native build verification
 
-The Windows profile was rebuilt with the local MSYS2 UCRT64 toolchain. The
+The Windows profile was rebuilt with GCC 16.2.0 in the local MSYS2 UCRT64
+environment and OpenSSL 3.6.4. The
 profile links the existing hostapd AP/WPA/RADIUS stack and additionally enables
 the native EAP server modules for EAP-SIM, EAP-AKA, EAP-AKA', EAP-PAX, EAP-PSK,
 EAP-PWD, EAP-SAKE, EAP-GPSK, EAP-GPSK-SHA256, EAP-FAST, EAP-TEAP, EAP-EKE, and
@@ -116,14 +117,25 @@ The build completed successfully, including `hostapd.exe` and
 |---|---|
 | Version | hostapd 2.12 |
 | Path | `hostapd-2.12/hostapd/hostapd.exe` |
-| Size | 7,486,834 bytes |
-| SHA-256 | `2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34` |
+| Size | 7,475,058 bytes |
+| SHA-256 | `B02A0965C3DDE865E7E0501E7AF1BE8C06B4DB06CC426B5A494D8F978C01B39F` |
+| `hostapd_cli.exe` size | 364,323 bytes |
+| `hostapd_cli.exe` SHA-256 | `414A01F98F15066701126E569EEA13943E563038709821935ACCE8677A6B98B5` |
+| OpenSSL DLL dependencies | `libcrypto-3-x64.dll`; `libssl-3-x64.dll` |
 
-This identity is the rebuild that contains the driver corrections for command
-acknowledgement, `get_seqnum`, and management TX status. The OTA results in
-the following sections were produced by the previous executable, SHA-256
-`FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`, 7,466,243
-bytes. That matrix and the Windows fresh-SSID run were not repeated.
+The rebuild completed successfully but emitted non-fatal compiler warnings
+covering format specifiers, integer widths, pointer-width casts, and Winsock
+signedness. The release package includes both OpenSSL DLLs required by
+`hostapd.exe`. `hostapd.exe -v` and `hostapd_cli.exe -v` both reported version
+2.12.
+
+The preceding executable, SHA-256
+`2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34`,
+7,486,834 bytes, was used for the longer Ubuntu reconnect campaign. The
+six-radio OTA matrix and Windows fresh-SSID run used an earlier executable,
+SHA-256 `FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`,
+7,466,243 bytes. Those historical test results were not repeated on the
+v0.1 release binary.
 
 Compilation of an EAP server module is recorded as build evidence only. It is
 not classified as OTA interoperability evidence without a completed client
@@ -131,21 +143,23 @@ exchange.
 
 ## 5. Local regression verification
 
-The local Python regression and syntax check were executed after installation
-of the expanded native binary.
+The following Python regression and syntax results were recorded before the
+v0.1 binary rebuild. They were not rerun during package creation.
 
 | Check | Result |
 |---|---:|
-| `pytest -q` | 166 passed |
+| `pytest -q` | 166 passed in the previously recorded regression; not rerun for the v0.1 rebuild |
 | `python -m compileall -q wifit3_bridge` | Passed |
 | Native hostapd build | Passed |
 | `hostapd.exe -v` | hostapd 2.12 |
 
-## 6. Native-binary OTA regression
+## 6. Earlier native-binary OTA regression
 
-This run used the previous executable named above. It was tested on the MT7925AU AP path with the
-MT7610U observer. The executable identified in section 4 was not part of this run. The native-binary methods reached raw association, EAP success, complete
-WPA four-way handshake, and an authorized port.
+This historical run used the earlier executable identified in section 4 by
+SHA-256 `FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`.
+It was tested on the MT7925AU AP path with the MT7610U observer. It is not a
+test of the v0.1 release binary. The methods reached raw association, EAP
+success, complete WPA four-way handshake, and an authorized port.
 
 | Method | Raw association | Authentication | WPA state | WPA complete | EAP result | Process |
 |---|---:|---:|---|---:|---|---:|
@@ -163,15 +177,17 @@ WPA four-way handshake, and an authorized port.
 
 The successful native-binary regression demonstrates that the expanded EAP
 link set did not regress the previously verified Enterprise paths. A final
-single-radio EAP-IKEv2 sanity run against the current executable reached
-EAP-Success, WPA four-way completion, and an authorized port with no fatal
-hostapd state. The full six-radio matrix remains associated with the previous
-executable revision identified in section 4.
+single-radio EAP-IKEv2 sanity run on the preceding build identified in
+section 4 reached EAP-Success, WPA four-way completion, and an authorized port
+with no fatal hostapd state. The full six-radio matrix remains associated with
+the earlier executable revision identified in section 4.
 
 ## 7. Six-radio OTA verification summary
 
-The following controlled matrices were completed before and during the current
-build revision.
+The following controlled matrices were completed on earlier executable
+revisions and were not repeated on the v0.1 release binary. The six-radio
+matrix used SHA-256
+`FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`.
 
 | Protocol or cipher | Matrix result |
 |---|---:|
@@ -358,6 +374,12 @@ not as a failure of the previously verified raw-observer WPA and EAP matrices.
 
 ## 9. Native Linux client interoperability
 
+The reconnect and observation campaign in this section used the preceding
+hostapd executable, SHA-256
+`2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34`,
+7,486,834 bytes. The release binary was separately checked in the three
+single-association smoke runs in subsection 9.1.
+
 The external Ubuntu host provided wired control access. The WLAN station was
 an Alfa AWUS036ACHM using the MediaTek MT7610U chipset, USB identifier
 `0e8d:7610`, and the native Linux `mt76x0u` driver. The client environment was
@@ -422,6 +444,30 @@ Windows AP radio, channel, and security profiles. The wired connection was
 used only for remote control. No IP connectivity, Ethernet bridging, VLAN,
 throughput, roaming, power-save, or multi-client behavior was tested.
 
+### 9.1. v0.1 release-binary smoke tests
+
+The freshly rebuilt release binary (`hostapd.exe` SHA-256
+`B02A0965C3DDE865E7E0501E7AF1BE8C06B4DB06CC426B5A494D8F978C01B39F`) was
+tested against the same Ubuntu 26.04.1 LTS client, AWUS036ACHM station radio,
+Windows MT7925AU AP radio, BSSID, and channel. Each AP process ran for 45
+seconds with a fresh SSID and ephemeral credential. The Ubuntu client used
+`wpa_supplicant v2.11`. All three runs armed active-monitor link
+acknowledgements, reached `wpa_state=COMPLETED`, and ended with process return
+code zero and `fatal_failure=False`.
+
+| Security mode | Ubuntu client result | AP-side evidence | Shutdown observation |
+|---|---|---|---|
+| WPA2-Personal / CCMP | `key_mgmt=WPA2-PSK`; `wpa_state=COMPLETED` | AP enabled; active-monitor ACK count 2; 3 key slots | No beacon-send warning recorded |
+| WPA2-Personal / required PMF, BIP-CMAC-128 | `key_mgmt=WPA2-PSK`; CCMP; `wpa_state=COMPLETED` | AP enabled; active-monitor ACK count 2; 5 key slots including IGTK | Non-fatal software beacon-send warning during shutdown |
+| WPA3-Personal / SAE-H2E group 19, required PMF | `key_mgmt=SAE`; CCMP; `wpa_state=COMPLETED` | AP enabled; H2E and SAE confirm completed; ACK count 3; 5 key slots including IGTK | Non-fatal software beacon-send warning during shutdown |
+
+The PMF and SAE shutdown warning was `software beacon transmission failed;
+stopping`. It appeared after the 45-second test window during AP teardown.
+The runs exited successfully and did not report a fatal hostapd state. Source
+path analysis indicates that the test lease can be revoked before the
+asynchronous beacon task is cancelled. This classification is limited to the
+observed shutdown path; no long reconnect campaign was run on the v0.1 binary.
+
 ## 10. Management, accounting, and RADIUS evidence
 
 The bridge regression covers station creation, flag updates, authorization,
@@ -466,13 +512,12 @@ sequence numbers, `get_seqnum`, noack probe responses, and receive
 backpressure. Those corrections were checked with the local regression.
 The EAPOL receive parser also accounts for bounded DMA alignment padding
 before LLC/SNAP. The smoke runner now automatically enables the public
-active-monitor link-ACK API when supported by the selected radio. The expanded
-Ubuntu client campaign is documented in section 9 and covers WPA2-Personal,
-WPA2 with required PMF, and WPA3-SAE/H2E on the current native executable.
-The native executable was then rebuilt, as identified in section 4, so the
-driver acknowledgement, `get_seqnum`, and TX-status changes are in
-`hostapd.exe`. The six-radio OTA matrix and the Windows fresh-SSID run were
-not repeated against that binary.
+active-monitor link-ACK API when supported by the selected radio. The Ubuntu
+reconnect campaign in section 9 covers the preceding executable. The v0.1
+release rebuild was separately smoke-tested once in each of
+WPA2-Personal, required-PMF WPA2, and WPA3-SAE/H2E. The six-radio OTA matrix,
+Windows fresh-SSID matrix, and extended Ubuntu reconnect campaign were not
+repeated against the release binary.
 
 The observations were made on one Windows 11 system, one controlled channel,
 the listed six radios, and a serialized laboratory harness. They do not
@@ -484,8 +529,12 @@ interoperability with every external client implementation.
 
 The modified hostapd 2.12 build functions on the specified Windows 11 system
 over wifit3 for the experimentally verified AP, station, WPA, PMF, RADIUS, and
-Enterprise OTA paths listed in this report. The expanded native build is
-reproducible and passes the 166-test local regression. EAP-FAST/MSCHAPv2,
+Enterprise OTA paths listed in this report. The v0.1 executable was rebuilt
+and passed one Ubuntu-client association smoke test each for WPA2-Personal,
+required-PMF WPA2, and WPA3-SAE/H2E. The 166-test local regression is a
+previously recorded source-level result and was not rerun during the binary
+rebuild. The extended Ubuntu reconnect results and six-radio protocol matrix
+were generated with earlier executables. EAP-FAST/MSCHAPv2,
 EAP-TEAP/MSCHAPv2, EAP-EKE, and EAP-IKEv2 are verified on all six radios.
 
 Full hostapd functionality under Windows cannot be claimed because
@@ -499,4 +548,4 @@ and three SAE/H2E reconnects completed. A PMF SA Query timeout was observed
 during controlled reconnection, followed by successful association and key
 installation. These results verify interoperability for the tested Linux
 client and radio configuration; they do not establish universal compatibility
-or production-duration stability.
+or production-duration stability for the v0.1 executable.

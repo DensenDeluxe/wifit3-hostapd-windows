@@ -22,16 +22,20 @@ offload, hardware station-table offload, FT-over-DS/RRB, and production-grade
 radio timing remain outside the verified scope. Ethernet and VLAN are
 intentionally excluded from this project.
 
-An external Ubuntu 26.04.1 LTS client using the AWUS036ACHM completed
-WPA2-Personal/CCMP, WPA2 with required PMF/BIP-CMAC-128, and WPA3-SAE/H2E
-group 19 runs against the Windows AP. The campaign completed 6 WPA2
+The v0.1 release binary completed one Ubuntu 26.04.1 LTS client association
+in each of three smoke profiles using an AWUS036ACHM: WPA2-Personal/CCMP,
+WPA2 with required PMF/BIP-CMAC-128, and WPA3-SAE/H2E group 19. Each client
+reached `wpa_state=COMPLETED`. The longer campaign below used an earlier
+hostapd binary. It completed 6 WPA2
 connections including 5 controlled reconnects, 4 PMF connections including
 3 reconnects, and 4 SAE/H2E connections including 3 reconnects. Six SAE/H2E
 stability samples over 50 seconds remained in the completed state. One PMF
 SA Query timeout was observed during a controlled reconnect, followed by
-successful reassociation and key exchange. The SAE runner emitted one
-non-fatal beacon-task warning during shutdown, with no corresponding failure
-in the connected-state sample window. The Windows 11 WLAN client
+successful reassociation and key exchange. The prior-binary SAE runner emitted
+one non-fatal beacon-task warning during shutdown, with no corresponding
+failure in the connected-state sample window. The v0.1 PMF and SAE smoke runs
+also emitted this shutdown warning; its impact is described in the test
+report. The Windows 11 WLAN client
 completed one diagnostic association with a cached SSID, while a six-radio
 fresh-SSID matrix produced 0/6 discoveries and 0/6 associations. Linux-client
 interoperability is verified for the tested adapter and configuration;
@@ -41,8 +45,8 @@ repeatable Windows-client discovery remains unverified.
 
 | Component | Status | Evidence |
 |---|---|---|
-| Native `hostapd.exe` | Verified | MSYS2 UCRT64 build, hostapd 2.12 |
-| Native `hostapd_cli.exe` | Verified | Same build profile and toolchain |
+| Native `hostapd.exe` | Verified | v0.1 MSYS2 UCRT64 build, hostapd 2.12; SHA-256 `B02A0965C3DDE865E7E0501E7AF1BE8C06B4DB06CC426B5A494D8F978C01B39F` |
+| Native `hostapd_cli.exe` | Verified | v0.1 build; SHA-256 `414A01F98F15066701126E569EEA13943E563038709821935ACCE8677A6B98B5` |
 | wifit3 driver bridge | Verified experimentally | Authenticated local TCP IPC and six-radio matrix |
 | UDP control interface | Verified | Control smoke and `hostapd_cli` responses |
 | Windows idle event loop | Verified | Timer-only and control-socket tests |
@@ -71,8 +75,9 @@ real-radio end-to-end verification.
 | Station add, update, authorization, and removal | Software station store plus hostapd callbacks | Unit, bridge, and OTA management tests | Experimental laboratory path |
 | Deauthentication and disassociation | Native MLME callbacks with bounded retry | Broadcast and unicast tests, 6/6 per operation | Experimental laboratory path |
 | WPA2-Personal / CCMP | Software CCMP, PTK/GTK lifecycle | Complete M1–M4 OTA verification | Experimental laboratory path |
-| Windows 11 standard WLAN client | Temporary `netsh wlan` WPA2 profile path | Cached-SSID diagnostic 1/1; fresh-SSID matrix 0/6 | Conditional; repeatable discovery not verified |
-| Ubuntu standard WLAN client | Ubuntu 26.04.1 LTS; `wpa_supplicant v2.11`; AWUS036ACHM using native `mt76x0u`; WPA2-CCMP, required-PMF WPA2, WPA3-SAE/H2E group 19 | WPA2: 6 sessions, 5/5 reconnects, 183.806 s after final reconnect; PMF: 4 sessions, 3/3 reconnects; SAE/H2E: 4 sessions, 3/3 reconnects and 6/6 completed samples over 50 s; AP fatal failure false | Verified for tested configuration; one PMF SA Query timeout and one non-fatal SAE shutdown beacon warning observed |
+| Windows 11 standard WLAN client | Temporary `netsh wlan` WPA2 profile path | Cached-SSID diagnostic 1/1; historical fresh-SSID matrix 0/6 on earlier binary FCEEA5E8 | Conditional; release-binary discovery not retested |
+| Ubuntu standard WLAN client, v0.1 binary | Ubuntu 26.04.1 LTS; `wpa_supplicant v2.11`; AWUS036ACHM using native `mt76x0u`; WPA2-CCMP, required-PMF WPA2, WPA3-SAE/H2E group 19 | One association per mode; all three reached `wpa_state=COMPLETED`; 45-second AP runs; no fatal AP failure | Smoke-verified for tested configuration; PMF and SAE runs logged a non-fatal beacon-send warning during shutdown |
+| Ubuntu standard WLAN client, prior binary | Same client and radio configuration | WPA2: 6 sessions, 5/5 reconnects, 183.806 s after final reconnect; PMF: 4 sessions, 3/3 reconnects; SAE/H2E: 4 sessions, 3/3 reconnects and 6/6 completed samples over 50 s; AP fatal failure false | Verified for tested configuration; one PMF SA Query timeout and one non-fatal SAE shutdown beacon warning observed |
 | WPA2-Personal / TKIP | Software TKIP, Michael, RC4, ICV, and replay protection | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-128 | Software AES-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-256 | Software AES-256-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
@@ -150,21 +155,28 @@ the laboratory path that matrix exercised:
 
 ## Reproducibility and evidence
 
-The native executable currently installed in the workspace was built with the
-local MSYS2 UCRT64 toolchain from the expanded Windows profile. It includes
-the driver corrections in the previous section. The six-radio OTA matrix and
-the Windows fresh-SSID run were produced by the previous executable, SHA-256
-`FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`, 7,466,243
-bytes, and were not repeated.
+The v0.1 executable was rebuilt with the local MSYS2 UCRT64 toolchain from the
+expanded Windows profile. It includes the driver corrections in the previous
+section. Its OTA evidence is limited to one Ubuntu client association in each
+of the WPA2, required-PMF WPA2, and WPA3-SAE/H2E smoke profiles. The extended
+Ubuntu reconnect campaign used the preceding executable, SHA-256
+`2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34`.
+The six-radio OTA matrices and Windows fresh-SSID run used the earlier
+executable, SHA-256
+`FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`.
+Neither historical matrix was repeated on the v0.1 executable.
 
 | Artifact | Value |
 |---|---|
 | Version | hostapd 2.12 |
 | Executable | `hostapd-2.12/hostapd/hostapd.exe` |
-| Executable size | 7,486,834 bytes |
-| SHA-256 | `2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34` |
-| Python regression | 166 passed |
-| Python compilation | Passed |
+| Executable size | 7,475,058 bytes |
+| SHA-256 | `B02A0965C3DDE865E7E0501E7AF1BE8C06B4DB06CC426B5A494D8F978C01B39F` |
+| `hostapd_cli.exe` size | 364,323 bytes |
+| `hostapd_cli.exe` SHA-256 | `414A01F98F15066701126E569EEA13943E563038709821935ACCE8677A6B98B5` |
+| OpenSSL runtime | 3.6.4; both required DLLs are included in the release package |
+| Recorded Python regression | 166 passed before v0.1 packaging; not rerun during the rebuild |
+| Python compilation | Previously passed; not rerun during the rebuild |
 
 ## References
 

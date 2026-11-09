@@ -34,6 +34,20 @@ association. The fresh-SSID standard-client matrix produced no repeatable
 discoveries or associations on the six AP radios. Raw observer-based WPA and
 EAP results are reported independently from this discovery limitation.
 
+## Prebuilt Windows package
+
+The experimental Windows x64 binaries are available from the
+[GitHub Releases page](https://github.com/DensenDeluxe/wifit3-hostapd-windows/releases/latest).
+Download the release binary package and the matching GitHub source archive.
+Extract the binary package over the source tree to install `hostapd.exe`,
+`hostapd_cli.exe`, and their required OpenSSL runtime libraries. The package
+includes a quick-start guide and the applicable license texts.
+
+The v0.1 binaries received single-association Ubuntu client smoke tests for
+WPA2-Personal, WPA2 with required PMF, and WPA3-SAE/H2E. Longer reconnect and
+stability runs in the test report used an earlier binary revision. Ethernet
+bridging and VLAN integration are outside the project scope.
+
 ## Build and test
 
 ### wifit3

@@ -17,7 +17,8 @@ The Windows profile does not require `nl80211`, the Linux wireless API, or
 ## Current result
 
 The native Windows build starts and operates with six wifit3-compatible USB
-radios. The local regression contains 164 passing tests. OTA verification
+radios. The latest recorded local regression contains 166 passing tests.
+OTA verification
 includes WPA2-Personal, WPA3-SAE groups 19/20/21, SAE-PK, SAE-EXT-KEY,
 FT-SAE, FT-SAE-EXT-KEY, PMF/BIP, EAP-TLS, EAP-MSCHAPv2, EAP-PSK, EAP-SAKE,
 EAP-PAX, EAP-GPSK, EAP-GPSK-SHA256, EAP-SIM, EAP-AKA, EAP-AKA', EAP-PWD groups 19/20/21,
@@ -33,6 +34,10 @@ AES-128-CBC, HMAC-SHA1 profile through EAP-Success and the WPA four-way
 exchange. EAP-IKEv2 is verified on all six radios for the hostapd-compatible
 DH group-2, AES-CBC, HMAC-SHA1-96, IKE_AUTH, EAP-Success, and WPA four-way
 profile.
+
+These broad OTA matrices are historical results from earlier executable
+revisions. They were not repeated on the v0.1 release binary; its Ubuntu client
+evidence is limited to the three single-association smoke profiles below.
 
 Ethernet, VLAN, FT-over-DS/RRB, hardware key offload, hardware station-table
 offload, and production radio stability are not claimed. Ethernet and VLAN are
@@ -62,19 +67,37 @@ cp .config.wifit3 .config
 make -j2 hostapd hostapd_cli
 ```
 
-The current workspace executable is:
+The v0.1 release executable was rebuilt with GCC 16.2.0 and OpenSSL 3.6.4. Its
+single-association Ubuntu smoke tests covered WPA2-Personal/CCMP, required-PMF
+WPA2/BIP-CMAC-128, and WPA3-SAE/H2E group 19. Each run reached
+`wpa_state=COMPLETED`; the test report distinguishes these checks from the
+longer reconnect campaign performed with the prior binary.
+
+The release executable is:
 
 ```text
 hostapd-2.12/hostapd/hostapd.exe
 ```
 
-SHA-256:
+| Artifact | Size | SHA-256 |
+|---|---:|---|
+| `hostapd.exe` | 7,475,058 bytes | `B02A0965C3DDE865E7E0501E7AF1BE8C06B4DB06CC426B5A494D8F978C01B39F` |
+| `hostapd_cli.exe` | 364,323 bytes | `414A01F98F15066701126E569EEA13943E563038709821935ACCE8677A6B98B5` |
+| `libcrypto-3-x64.dll` | 5,495,100 bytes | `7D25614B72D98B1A280D50DE253F395F4062058AF8E22D2DC1EC44FB648F0028` |
+| `libssl-3-x64.dll` | 992,847 bytes | `A587A71129263D8114CB7F45F5DCBD2260FD37659286EA6174046491A458F914` |
 
-```text
-2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34
-```
+`hostapd.exe` dynamically loads both OpenSSL DLLs. The release package
+includes them beside the executable. The rebuild succeeded with non-fatal
+compiler warnings involving format specifiers, integer widths, pointer-width
+casts, and Winsock signedness; see the test report.
 
-Size: 7,486,834 bytes. This executable contains the driver corrections for command acknowledgement, `get_seqnum`, and management TX status. The six-radio OTA matrix and the Windows fresh-SSID run were produced by the previous executable, SHA-256 `FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`, 7,466,243 bytes, and were not repeated.
+The extended Ubuntu reconnect and stability campaign used the preceding
+executable, SHA-256
+`2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34`,
+7,486,834 bytes. The six-radio OTA matrices and Windows fresh-SSID matrix used
+an earlier executable, SHA-256
+`FCEEA5E8484C8CB18DDC53EF30CFA222F617BA9C714B5AC4249B3EA43B93FCBE`,
+7,466,243 bytes. Neither historical matrix was repeated on the v0.1 binary.
 
 ## Local validation
 
