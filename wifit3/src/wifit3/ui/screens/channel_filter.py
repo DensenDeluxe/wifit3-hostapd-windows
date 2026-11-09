@@ -1,0 +1,189 @@
+from typing import List, Optional
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, Label, SelectionList
+from textual.widgets.selection_list import Selection
+
+from wifit3.dot11.chan import is_dfs_channel
+
+
+class ChannelFilterDialog(ModalScreen[Optional[List[int]]]):
+    """Modal dialog that lets the user pick which channels the hopper visits."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=True),
+        Binding("a", "select_all", "All", show=True),
+        Binding("2", "select_24ghz", "2G", show=True),
+        Binding("5", "select_5ghz", "5G", show=True),
+        Binding("d", "select_dfs", "DFS", show=True),
+        Binding("n", "select_none", "None", show=True),
+        Binding("enter", "confirm", "OK", show=True, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ChannelFilterDialog {
+        align: center middle;
+    }
+    ChannelFilterDialog #dialog {
+        width: 48;
+        height: auto;
+        max-height: 90%;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+    ChannelFilterDialog #title {
+        width: 1fr;
+        text-align: center;
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    ChannelFilterDialog #band-row {
+        layout: grid;
+        grid-size: 4;
+        grid-gutter: 0 1;
+        height: 1;
+        margin-bottom: 1;
+    }
+    ChannelFilterDialog #band-row.-with-dfs {
+        grid-size: 5;
+    }
+    ChannelFilterDialog #band-row Button {
+        width: 100%;
+        min-width: 0;
+    }
+    ChannelFilterDialog SelectionList {
+        height: 1fr;
+        min-height: 3;
+        overflow-y: auto;
+        margin-bottom: 1;
+    }
+    ChannelFilterDialog #button-row {
+        dock: bottom;
+        height: auto;
+        align: center middle;
+    }
+    """
+
+    def __init__(
+        self,
+        supported_channels: List[int],
+        current_filter: Optional[List[int]] = None,
+    ) -> None:
+        super().__init__()
+        self._supported: List[int] = sorted(set(supported_channels))
+        # Treat a missing filter as "everything is selected"
+        initial = set(current_filter) if current_filter else set(self._supported)
+        self._initial_selected: set[int] = initial & set(self._supported)
+        self._dfs_channels: List[int] = [ch for ch in self._supported if is_dfs_channel(ch)]
+
+    def compose(self) -> ComposeResult:
+        selections = [
+            Selection(
+                self._format_label(ch),
+                ch,
+                initial_state=(ch in self._initial_selected),
+            )
+            for ch in self._supported
+        ]
+
+        with Vertical(id="dialog"):
+            yield Label("Channel Filter", id="title")
+            with Horizontal(id="band-row", classes="-with-dfs" if self._dfs_channels else ""):
+                yield Button("[u]a[/]ll", variant="success", id="btn-all", compact=True)
+                yield Button("[u]2[/]G", variant="primary", id="btn-24ghz", compact=True)
+                yield Button("[u]5[/]G", variant="primary", id="btn-5ghz", compact=True)
+                if self._dfs_channels:
+                    yield Button("[u]D[/]FS", variant="primary", id="btn-dfs", compact=True)
+                yield Button("[u]n[/]one", variant="error", id="btn-none", compact=True)
+            yield SelectionList[int](*selections, id="channel-list")
+            with Horizontal(id="button-row"):
+                yield Button("OK", variant="primary", id="btn-ok")
+                yield Button("Cancel", variant="default", id="btn-cancel")
+
+    # Rows the dialog spends on everything *except* the channel list's own box.
+    _CHROME_ROWS = 12
+
+    def on_mount(self) -> None:
+        self._resize_dialog()
+        self.query_one("#channel-list", SelectionList).focus()
+
+    def on_resize(self) -> None:
+        self._resize_dialog()
+
+    def _resize_dialog(self) -> None:
+        """Cap the dialog at its natural content height, but never > ~90% of screen."""
+        natural = len(self._supported) + 2 + self._CHROME_ROWS
+        ceiling = int(self.app.size.height * 0.9)
+        self.query_one("#dialog", Vertical).styles.max_height = min(natural, ceiling)
+
+    @staticmethod
+    def _format_label(channel: int) -> str:
+        if channel <= 14:
+            band = "2.4 GHz"
+        elif is_dfs_channel(channel):
+            band = "DFS"
+        else:
+            band = "5 GHz"
+        return f"CH {channel:>3}   ({band})"
+
+    # --- Quick-filter actions -------------------------------------------------
+
+    def _selection_list(self) -> SelectionList:
+        return self.query_one("#channel-list", SelectionList)
+
+    def action_select_all(self) -> None:
+        self._selection_list().select_all()
+
+    def action_select_none(self) -> None:
+        self._selection_list().deselect_all()
+
+    def action_select_24ghz(self) -> None:
+        sl = self._selection_list()
+        sl.deselect_all()
+        for ch in self._supported:
+            if ch <= 14:
+                sl.select(ch)
+
+    def action_select_5ghz(self) -> None:
+        sl = self._selection_list()
+        sl.deselect_all()
+        for ch in self._supported:
+            if ch > 14:
+                sl.select(ch)
+
+    def action_select_dfs(self) -> None:
+        sl = self._selection_list()
+        sl.deselect_all()
+        for ch in self._dfs_channels:
+            sl.select(ch)
+
+    def check_action(self, action: str, parameters: tuple) -> bool:
+        if action == "select_dfs":
+            return bool(self._dfs_channels)
+        return True
+
+    # --- Confirm / cancel -----------------------------------------------------
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_confirm(self) -> None:
+        selected = sorted(self._selection_list().selected)
+        # Empty selection is treated as cancel
+        self.dismiss(selected if selected else None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        {
+            "btn-all": self.action_select_all,
+            "btn-24ghz": self.action_select_24ghz,
+            "btn-5ghz": self.action_select_5ghz,
+            "btn-dfs": self.action_select_dfs,
+            "btn-none": self.action_select_none,
+            "btn-ok": self.action_confirm,
+            "btn-cancel": self.action_cancel,
+        }[event.button.id]()

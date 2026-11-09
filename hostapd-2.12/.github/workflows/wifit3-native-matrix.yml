@@ -1,0 +1,55 @@
+# Native builds must execute on each OS; a Linux build proves nothing for Win/mac.
+# This is a contributed CI recipe, not evidence that the other targets pass.
+name: hostapd-2.12 wifit3 native build matrix
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'hostapd/**'
+      - 'src/**'
+      - 'wifit3_bridge/**'
+      - '.github/workflows/wifit3-native-matrix.yml'
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential libssl-dev python3 openssl
+      - run: cp hostapd/.config.wifit3 hostapd/.config && make -C hostapd -j2 hostapd
+      - run: PYTHONPATH=. python3 -m unittest discover -s wifit3_bridge/tests -v
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install openssl@3
+      - name: Native macOS build
+        shell: bash
+        run: |
+          cp hostapd/.config.wifit3 hostapd/.config
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          export CPPFLAGS="-I${OPENSSL_PREFIX}/include"
+          export LDFLAGS="-L${OPENSSL_PREFIX}/lib"
+          make -C hostapd -j2 hostapd
+      - run: PYTHONPATH=. python3 -m unittest discover -s wifit3_bridge/tests -v
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-python
+      - name: Native Windows build
+        run: |
+          cp hostapd/.config.wifit3 hostapd/.config
+          make -C hostapd -j2 hostapd CONFIG_NATIVE_WINDOWS=y
+      - name: Native Windows Python IPC tests
+        run: PYTHONPATH=. python -m unittest discover -s wifit3_bridge/tests -v

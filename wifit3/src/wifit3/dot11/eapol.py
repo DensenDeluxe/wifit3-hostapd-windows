@@ -1,0 +1,71 @@
+"""802.11 Data-frame header + EAPOL-Key assembly (802.11 spec, no I/O).
+
+EAPOL-Key multi-byte fields are network order.
+"""
+from enum import IntEnum
+import struct
+
+from wifit3.dot11.mac import mac_header
+
+LLC_SNAP_EAPOL = bytes.fromhex("aaaa03000000888e")   # SNAP header + EtherType 0x888E (EAPOL)
+
+MIC_LEN = 16
+NONCE_LEN = 32
+MIC_OFFSET = 81                 # MIC start within the 802.1X payload (hashcat -m 22000 reads it here)
+
+_EAPOL_VERSION = 2
+EAPOL_TYPE_EAP = 0
+EAPOL_TYPE_KEY = 3
+_KEY_DESC_RSN = 2
+KEY_DESCRIPTOR_VERSION_MASK = 0x0007     # Key Information bits 0-2
+_KEY_IV = bytes(16)
+_KEY_RSC = bytes(8)
+_KEY_ID = bytes(8)
+
+
+class KeyDescriptorVersion(IntEnum):
+    """Key Information bits 0-2: the MIC and key-wrap algorithms."""
+    HMAC_MD5_RC4 = 1      # TKIP pairwise
+    HMAC_SHA1_AES = 2     # CCMP pairwise
+    AES_128_CMAC = 3      # PSK-SHA256, FT-PSK
+
+
+HMAC_MD5_RC4 = KeyDescriptorVersion.HMAC_MD5_RC4
+HMAC_SHA1_AES = KeyDescriptorVersion.HMAC_SHA1_AES
+AES_128_CMAC = KeyDescriptorVersion.AES_128_CMAC
+
+
+def data_header(*, to_ds: bool, bssid: bytes, client: bytes) -> bytes:
+    """24-byte Data header. to_ds (client->AP): addr1=bssid addr2=client addr3=bssid;
+    else (AP->client): addr1=client addr2=bssid addr3=bssid. Duration + sequence zeroed."""
+    if to_ds:
+        return mac_header(b"\x08\x01", bssid, client, bssid)
+    return mac_header(b"\x08\x02", client, bssid, bssid)
+
+
+def eapol_key(*, key_info: int, key_len: int, replay: int, nonce: bytes,
+              key_data: bytes = b"", mic: bytes = bytes(MIC_LEN)) -> bytes:
+    """The 802.1X EAPOL-Key payload (version byte through Key Data). The MIC is computed
+    over these exact bytes with the MIC field zeroed, then spliced back at ``MIC_OFFSET``."""
+    if len(nonce) != NONCE_LEN:
+        raise ValueError(f"nonce must be {NONCE_LEN} bytes, got {len(nonce)}")
+    if len(mic) != MIC_LEN:
+        raise ValueError(f"mic must be {MIC_LEN} bytes, got {len(mic)}")
+    body = (
+        bytes([_KEY_DESC_RSN])
+        + struct.pack(">H", key_info)
+        + struct.pack(">H", key_len)
+        + struct.pack(">Q", replay)
+        + nonce
+        + _KEY_IV + _KEY_RSC + _KEY_ID
+        + mic
+        + struct.pack(">H", len(key_data))
+        + key_data
+    )
+    return bytes([_EAPOL_VERSION, EAPOL_TYPE_KEY]) + struct.pack(">H", len(body)) + body
+
+
+def set_mic(payload: bytes, mic: bytes) -> bytes:
+    if len(mic) != MIC_LEN:
+        raise ValueError(f"mic must be {MIC_LEN} bytes, got {len(mic)}")
+    return payload[:MIC_OFFSET] + mic + payload[MIC_OFFSET + MIC_LEN:]

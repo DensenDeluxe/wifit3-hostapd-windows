@@ -1,0 +1,657 @@
+"""The session-wide 802.11 picture (``WlanSink``): the AP/client registry, WEP capture, packet
+stats and forged-MAC bookkeeping, built from parsed RX frames that a ``WlanArray`` has already
+deduplicated across cards. One sink per session, fed by every card; it holds no hardware or
+event-loop state, so it is unit-testable on ``Packet`` inputs alone.
+
+Moved here (largely verbatim) from ``WlanInterface``, which becomes a pure per-card radio. The one
+addition for multicard is ``card_id``: RSSI is tracked per receiving card in ``signal_by_card`` so
+the Power reading can pick the strongest antenna, while every other field (beacons, IEs, clients,
+handshakes) is updated once, on the deduplicated (novel) copy only."""
+import asyncio
+from collections import deque
+import logging
+import threading
+import time
+from typing import Dict, List, Optional, Set
+
+from wifit3.chips.log_trace import TRACE   # registers Logger.trace + the level name
+from wifit3.models import AccessPoint, Client, Handshake, HandshakeMessage, IdSource
+from wifit3.dot11.eapol import AES_128_CMAC, HMAC_SHA1_AES, KEY_DESCRIPTOR_VERSION_MASK
+from wifit3.dot11.mac import mac_to_str
+from wifit3.dot11.parser import WlanFrameParser
+from wifit3.dot11.rsn import AKM_FT_PSK, AKM_PSK, AKM_PSK_SHA256
+from wifit3.dot11.wsc import messages as WSC
+from wifit3.dot11.wsc.identity import apply_wsc_identity
+from wifit3.dot11.packet import (
+    Packet, BeaconPacket, EapolPacket, EapPacket, WepDataPacket, AssocRequestPacket,
+    AssocRespPacket, ProbeReqPacket, is_group_mac,
+)
+from wifit3.wlan.packet_stats import PacketStats
+from wifit3.wlan.wep_store import WepCaptureStore
+
+logger = logging.getLogger(__name__)
+
+_KEY_DESCRIPTOR_VERSION_BY_PMKID_AKM = {AKM_PSK: HMAC_SHA1_AES, AKM_PSK_SHA256: AES_128_CMAC, AKM_FT_PSK: AES_128_CMAC}
+_EAPOL_KEY_DESCRIPTOR_TYPE_OFFSET = 4
+_EAPOL_KEY_DESCRIPTOR_TYPE_RSN = 2
+_KEY_INFO_PAIRWISE = 0x0008
+_KEY_INFO_ACK = 0x0080
+_KEY_INFO_MIC = 0x0100
+
+
+def _set_result(fut, value) -> None:
+    if not fut.done():
+        fut.set_result(value)
+
+
+def _enc_rank(label: str) -> int:
+    """Rank an encryption label by evidence strength: OPEN(0) < WEP(1) < WPA*(2)."""
+    if label == "OPEN":
+        return 0
+    if label == "WEP":
+        return 1
+    return 2  # any IE-derived label
+
+
+def _fmt_frame(tag: str, ftype: str, src, dest, bssid) -> str:
+    """One consistent line for a captured 802.11 frame."""
+    return f"[{tag}] {ftype:<9} {src} → {dest}  (bssid {bssid})"
+
+
+class WlanSink:
+    """The deduplicated 802.11 picture across all cards in a session."""
+
+    SIBLING_BIT_DIFF_MAX = 4
+    SIGNAL_WINDOW_SIZE = 8
+
+    def __init__(self):
+        self.access_points: Dict[str, AccessPoint] = {}
+        self.clients: Dict[str, Client] = {}
+        self.wep_store = WepCaptureStore()  # WEP IV tallying
+        self.packet_stats = PacketStats()   # Packet dashboard source
+        self.own_macs: Set[str] = set()     # MACs we transmit as; dropped at ingest, never a client
+        self.probed_ssids: Set[str] = set()  # every SSID probed for this session, by any client
+        # (bssid, client) -> the PMKID-carrying M1 whose AKM the next M2 may confirm
+        self._pmkid_m1_awaiting_m2: Dict[tuple[str, str], EapolPacket] = {}
+        self._waiters: list = []            # (match, future, loop) for the next_frame await-API
+        self._waiters_lock = threading.Lock()
+
+    # ----- signal (per-card) -------------------------------------------------
+
+    @classmethod
+    def _smooth(cls, history_map: Dict[str, deque[int]], card_id: str, rssi: int) -> int:
+        """Sliding-window average across the last SIGNAL_WINDOW_SIZE samples per card."""
+        history = history_map.get(card_id)
+        if history is None:
+            history = deque(maxlen=cls.SIGNAL_WINDOW_SIZE)
+            history_map[card_id] = history
+        if rssi is not None and (rssi > -100 or not history):
+            history.append(rssi)
+        return round(sum(history) / len(history)) if history else -100
+
+    def _record_ap_signal(self, ap: AccessPoint, card_id: str, rssi: int) -> None:
+        ap.signal_by_card[card_id] = self._smooth(ap.signal_history, card_id, rssi)
+
+    def _record_client_signal(self, client: Client, card_id: str, rssi: int) -> None:
+        client.signal_by_card[card_id] = self._smooth(client.signal_history, card_id, rssi)
+
+    # ----- ingest ------------------------------------------------------------
+
+    def update(self, pkt: Packet, card_id: str, channel_hint: int = 1) -> None:
+        """Fold one deduplicated (novel) frame into the picture. ``card_id`` names the receiving
+        card (for per-card RSSI); ``channel_hint`` is that card's current channel, used only when a
+        beacon carries no channel of its own."""
+        frame_type = pkt.type
+        bssid = pkt.bssid
+
+        if (
+            frame_type in ("data", "eap", "eapol", "wep_data", "assoc_resp", "reassoc_resp",
+                           "deauth", "disassoc")
+            or frame_type.startswith("mgmt_")
+        ) and logger.isEnabledFor(TRACE):
+            logger.trace("%s", _fmt_frame("RXFRAME", frame_type, pkt.source, pkt.dest, bssid))
+
+        if isinstance(pkt, ProbeReqPacket) and self._is_real_ssid(pkt.ssid):
+            self.probed_ssids.add(pkt.ssid)
+
+        if not bssid or bssid == "Unknown" or bssid == "ff:ff:ff:ff:ff:ff":
+            return
+
+        self.packet_stats.record_rx(bssid, frame_type)  # Live packet dashboard
+
+        self._on_beacon_frame(pkt, card_id, channel_hint)
+        self._on_wepdata_frame(pkt)
+        self._track_client(pkt, card_id)
+        self._on_eapol_frame(pkt)
+        self._on_eap_frame(pkt)
+
+    def record_signal(self, card_id: str, bssid: str, rssi: int) -> None:
+        """Update per-card RSSI from a cross-card duplicate: the frame's picture was already folded
+        in by the card that heard it first, but every card that also heard it contributes its own
+        antenna's signal. No-op if the BSSID is not a known AP."""
+        ap = self.access_points.get(bssid)
+        if ap is not None:
+            self._record_ap_signal(ap, card_id, rssi)
+
+    def record_injected_eapol(self, frame: bytes) -> None:
+        """Fold EvilTwin's injected M1 into the sink, bypassing the array's own-frame RX filter, so
+        a client's M2 pairs with it."""
+        pkt = WlanFrameParser.parse_80211_frame(frame, 0)
+        if isinstance(pkt, EapolPacket):
+            self._on_eapol_frame(pkt)
+
+    def record_injected_beacon(self, frame: bytes, card_id: str, channel_hint: int) -> None:
+        """Fold EvilTwin's own beacon into the sink, bypassing the array's own-frame RX filter, so a
+        twin on its own BSSID has the AP record its 4-way is tracked under."""
+        pkt = WlanFrameParser.parse_80211_frame(frame, -100)
+        if isinstance(pkt, BeaconPacket):
+            self._on_beacon_frame(pkt, card_id, channel_hint)
+
+    # ----- typed handlers ----------------------------------------------------
+
+    def _on_beacon_frame(self, pkt: Packet, card_id: str, channel_hint: int) -> bool:
+        """Build/refresh the AP from a beacon or probe response."""
+        if not isinstance(pkt, BeaconPacket):
+            return False
+        frame_type = pkt.type
+        bssid = pkt.bssid
+        rssi = pkt.rssi
+        ssid = pkt.ssid
+        channel = pkt.channel if pkt.channel is not None else channel_hint
+        enc = pkt.encryption
+        akms = pkt.akms
+        akm_suites = pkt.akm_suites
+        rsn_valid = pkt.rsn_valid
+        vendor_akm_offered = pkt.vendor_akm_offered
+        pairwise_cipher = pkt.pairwise_cipher
+        wpa3 = pkt.wpa3
+        transition_mode = pkt.transition_mode
+        pmf_capable = pkt.pmf_capable
+        pmf_required = pkt.pmf_required
+        beacon_protection = pkt.beacon_protection
+        wps = pkt.wps
+        wps_locked = pkt.wps_locked
+        wps_version = pkt.wps_version
+        wps_config_methods = pkt.wps_config_methods
+        wps_device_password_id = pkt.wps_device_password_id
+        wps_selected_registrar = pkt.wps_selected_registrar
+        wsc_manufacturer = pkt.wsc_manufacturer
+        wsc_model_name = pkt.wsc_model_name
+        wsc_model_number = pkt.wsc_model_number
+        wsc_device_name = pkt.wsc_device_name
+        wsc_device_type = pkt.wsc_device_type
+
+        if bssid not in self.access_points:
+            ap = AccessPoint(
+                bssid=bssid,
+                ssid=ssid if self._is_real_ssid(ssid) else None,
+                channel=channel,
+                encryption=enc,
+                akms=list(akms),
+                akm_suites=list(akm_suites),
+                rsn_valid=rsn_valid,
+                vendor_akm_offered=vendor_akm_offered,
+                pairwise_cipher=pairwise_cipher,
+                beacons=1 if frame_type == "beacon" else 0,
+                wpa3=wpa3,
+                transition_mode=transition_mode,
+                pmf_capable=pmf_capable,
+                pmf_required=pmf_required,
+                beacon_protection=beacon_protection,
+                wps=wps,
+                wps_locked=wps_locked,
+                wps_version=wps_version,
+                wps_config_methods=wps_config_methods,
+                wps_device_password_id=wps_device_password_id,
+                wps_selected_registrar=wps_selected_registrar,
+                chipset=pkt.chipset,
+            )
+            if wps:
+                ap.identity.update(
+                    IdSource.WSC_BEACON,
+                    manufacturer=wsc_manufacturer,
+                    model_name=wsc_model_name,
+                    model_number=wsc_model_number,
+                    device_name=wsc_device_name,
+                    device_type=wsc_device_type,
+                )
+            self.access_points[bssid] = ap
+            self._record_ap_signal(ap, card_id, rssi)
+            self._recompute_siblings_for(bssid)
+            if self._is_real_ssid(ssid):
+                logger.trace('[RXFRAME] %-9s New AP on Ch %s: %s ("%s")',
+                             "beacon", channel, bssid, ssid)
+        else:
+            ap = self.access_points[bssid]
+            old_channel = ap.channel
+            if frame_type == "beacon":
+                ap.beacons += 1
+
+            self.decloak(ap, ssid, frame_type)
+
+            self._record_ap_signal(ap, card_id, rssi)
+
+            # Sibling links are channel-scoped, so re-evaluate on an actual channel move.
+            ap.channel = channel
+            if old_channel != channel:
+                self._recompute_siblings_for(bssid)
+            if (_enc_rank(enc), rsn_valid) >= (_enc_rank(ap.encryption), ap.rsn_valid):
+                ap.encryption = enc
+                ap.akms = list(akms)
+                ap.akm_suites = list(akm_suites)
+                ap.rsn_valid = rsn_valid
+                ap.vendor_akm_offered = vendor_akm_offered
+                ap.pairwise_cipher = pairwise_cipher
+                ap.wpa3 = wpa3
+                ap.transition_mode = transition_mode
+                ap.pmf_capable = pmf_capable
+                ap.pmf_required = pmf_required
+                ap.beacon_protection = beacon_protection
+            if pkt.chipset:
+                ap.chipset = pkt.chipset
+            # Only refresh WPS when this frame carried the IE.
+            if wps:
+                ap.wps = True
+                ap.wps_locked = wps_locked
+                ap.wps_version = wps_version
+                ap.wps_config_methods = wps_config_methods
+                ap.wps_device_password_id = wps_device_password_id
+                ap.wps_selected_registrar = wps_selected_registrar
+                ap.identity.update(
+                    IdSource.WSC_BEACON,
+                    manufacturer=wsc_manufacturer,
+                    model_name=wsc_model_name,
+                    model_number=wsc_model_number,
+                    device_name=wsc_device_name,
+                    device_type=wsc_device_type,
+                )
+
+        ap = self.access_points[bssid]
+        ap.last_seen = time.time()
+
+        # Stash the latest RSNIE
+        rsn_ie = pkt.rsn_ie_raw
+        if rsn_ie and (rsn_valid or not ap.rsn_valid):
+            ap.rsn_ie = rsn_ie
+
+        # Stash the latest beacon and back-fill handshakes missing one.
+        if frame_type == "beacon":
+            raw_beacon = pkt.raw
+            if raw_beacon:
+                ap.last_beacon_frame = raw_beacon
+                for hs in ap.handshakes.values():
+                    if not hs.beacon_frame:
+                        hs.beacon_frame = raw_beacon
+                    if ap.akm_suites and not hs.akm_offered:
+                        hs.akm_offered = list(ap.akm_suites)
+                    if ap.vendor_akm_offered:
+                        hs.vendor_akm_offered = True
+                    if ap.rsn_ie is not None:
+                        hs.rsn_ie_seen = True
+        return True
+
+    def _on_wepdata_frame(self, pkt: Packet) -> bool:
+        """Route a WEP Data frame into the passive capture store."""
+        if not isinstance(pkt, WepDataPacket):
+            return False
+        bssid = pkt.bssid
+        ap = self.access_points.get(bssid)
+        if ap is not None and (ap.encryption or "").upper() == "WEP":
+            stats = self.wep_store.observe(bssid, pkt)
+            if stats is not None and ap.wep is None:
+                ap.wep = stats
+        return True
+
+    def _track_client(self, pkt: Packet, card_id: str) -> bool:
+        """Register/refresh the client STA behind a frame (assoc, probed SSIDs, decloak)."""
+        frame_type = pkt.type
+        if frame_type not in (
+            "probe_req", "assoc_req", "reassoc_req", "data", "wep_data", "eapol", "eap",
+            "deauth", "disassoc", "assoc_resp", "reassoc_resp",
+        ):
+            return False
+        bssid = pkt.bssid
+        rssi = pkt.rssi
+        if (
+            frame_type in ("deauth", "disassoc")
+            and pkt.source == bssid
+            and is_group_mac(pkt.dest)
+        ):
+            for client in self.clients.values():
+                if client.bssid == bssid:
+                    client.akm_selected = None
+            self._pmkid_m1_awaiting_m2 = {
+                key: m1 for key, m1 in self._pmkid_m1_awaiting_m2.items() if key[0] != bssid}
+            return True
+        client_mac = pkt.client_mac
+        if not client_mac or client_mac in self.own_macs:
+            return True
+
+        if (frame_type in ("assoc_req", "reassoc_req", "deauth", "disassoc")
+                or isinstance(pkt, AssocRespPacket) and pkt.status not in (None, 0)):
+            self._pmkid_m1_awaiting_m2.pop((bssid, client_mac), None)
+
+        if client_mac not in self.clients:
+            self.clients[client_mac] = Client(mac=client_mac)
+        client = self.clients[client_mac]
+        self._record_client_signal(client, card_id, rssi)
+        client.packets += 1
+
+        if frame_type in ("assoc_req", "reassoc_req", "data", "wep_data", "eapol", "eap") and bssid:
+            if client.bssid != bssid:
+                client.akm_selected = None
+                if client.bssid is not None:
+                    self._pmkid_m1_awaiting_m2.pop((client.bssid, client_mac), None)
+            client.bssid = bssid
+            if isinstance(pkt, AssocRequestPacket):
+                client.akm_selected = pkt.assoc_akm
+
+        if (isinstance(pkt, AssocRespPacket) and pkt.status not in (None, 0)
+                and client.bssid == bssid):
+            client.akm_selected = None
+
+        if frame_type in ("deauth", "disassoc") and client.bssid == bssid:
+            client.akm_selected = None
+
+        if frame_type == "probe_req" and self._is_real_ssid(pkt.ssid):
+            client.probed_ssids.add(pkt.ssid)
+
+        if frame_type in ("assoc_req", "reassoc_req"):
+            ap = self.access_points.get(bssid)
+            if ap is not None:
+                self.decloak(ap, pkt.ssid, frame_type)
+        return True
+
+    def _on_eapol_frame(self, pkt: Packet) -> bool:
+        """Track the 4-way handshake / PMKID for a client on a known AP."""
+        if not isinstance(pkt, EapolPacket):
+            return False
+        bssid = pkt.bssid
+        ap = self.access_points.get(bssid)
+        if ap is None:
+            return True
+        self._on_wps_m1_frame(pkt, ap)
+        client_mac = pkt.client_mac
+        raw_frame = pkt.raw
+        replay = pkt.replay_counter
+        if not (client_mac and raw_frame and replay):
+            return True
+
+        hs = ap.handshakes.get(client_mac)
+        if hs is None:
+            hs = Handshake(
+                bssid=bssid,
+                client_mac=client_mac,
+                beacon_frame=ap.last_beacon_frame,
+                akm_offered=list(ap.akm_suites),
+                vendor_akm_offered=ap.vendor_akm_offered,
+                rsn_ie_seen=ap.rsn_ie is not None,
+            )
+            ap.handshakes[client_mac] = hs
+        elif ap.rsn_ie is not None:
+            # Refresh in case the handshake was created before the AP's RSN IE was known.
+            hs.akm_offered = list(ap.akm_suites)
+            hs.vendor_akm_offered = ap.vendor_akm_offered
+            hs.rsn_ie_seen = True
+
+        # AKM this association negotiated, snapshotted now: this frame's own RSN IE
+        # (M2/M3), else the client's assoc-time selection.
+        akm = pkt.akm
+        if akm is None and not pkt.akm_selection_rejected:
+            client_obj = self.clients.get(client_mac)
+            if client_obj is not None and client_obj.bssid == bssid:
+                akm = client_obj.akm_selected
+
+        # Forged MACs keep a Handshake (for PMKID) but skip the EAPOL list.
+        if client_mac not in self.own_macs and not hs.has_message(raw_frame):
+            eapol = HandshakeMessage(
+                raw=raw_frame,
+                msg_num=pkt.msg_num,
+                replay_hex=replay.hex(),
+                nonce=pkt.nonce or b"",
+                mic=pkt.mic or b"",
+                key_data_len=pkt.key_data_len,
+                eapol_payload=pkt.payload,
+                akm=akm,
+                akm_selection_rejected=pkt.akm_selection_rejected,
+                mdid=pkt.mdid,
+                r0khid=pkt.r0khid,
+                r1khid=pkt.r1khid,
+                timestamp=time.time(),
+            )
+            hs.add_message(eapol)
+            msg_label = f"M{eapol.msg_num}" if eapol.msg_num else "EAPOL-?"
+            logger.info(f"[{msg_label}] {bssid} <-> {client_mac} (replay {eapol.replay_hex})")
+
+        pmkid = pkt.pmkid
+        if pmkid and not hs.pmkid:
+            hs.pmkid = pmkid
+            hs.pmkid_akm = akm
+            if pkt.key_info is not None:
+                hs.pmkid_key_descriptor_version = pkt.key_info & KEY_DESCRIPTOR_VERSION_MASK
+            logger.info(f"[PMKID] {bssid} <-> {client_mac} captured {pmkid.hex()}")
+        self._confirm_pmkid_akm(hs, pkt)
+        return True
+
+    @staticmethod
+    def _pairwise_key_frame(pkt: EapolPacket, key_info_flags: int) -> bool:
+        return (len(pkt.payload) > _EAPOL_KEY_DESCRIPTOR_TYPE_OFFSET
+                and pkt.payload[_EAPOL_KEY_DESCRIPTOR_TYPE_OFFSET] == _EAPOL_KEY_DESCRIPTOR_TYPE_RSN
+                and pkt.key_info is not None
+                and pkt.key_info & ~KEY_DESCRIPTOR_VERSION_MASK == _KEY_INFO_PAIRWISE | key_info_flags
+                and pkt.nonce is not None and any(pkt.nonce)
+                and pkt.mic is not None and any(pkt.mic) == bool(key_info_flags & _KEY_INFO_MIC))
+
+    def _confirm_pmkid_akm(self, hs: Handshake, pkt: EapolPacket) -> None:
+        """Take an unknown PMKID AKM from the M2 that answers its M1: the next EAPOL frame of
+        this handshake, same replay counter and key descriptor version."""
+        key = (hs.bssid, hs.client_mac)
+        m1 = self._pmkid_m1_awaiting_m2.pop(key, None)
+        if hs.pmkid_akm is not None:
+            return
+        if pkt.msg_num == 1:
+            if (pkt.pmkid is not None and pkt.pmkid == hs.pmkid
+                    and pkt.from_ds and not pkt.to_ds and pkt.source == hs.bssid
+                    and self._pairwise_key_frame(pkt, _KEY_INFO_ACK)):
+                self._pmkid_m1_awaiting_m2[key] = pkt
+            return
+        if (m1 is None or m1.key_info is None or pkt.key_info is None
+                or pkt.msg_num != 2 or pkt.akm not in _KEY_DESCRIPTOR_VERSION_BY_PMKID_AKM
+                or not pkt.to_ds or pkt.from_ds or pkt.source != hs.client_mac
+                or not self._pairwise_key_frame(pkt, _KEY_INFO_MIC)
+                or pkt.replay_counter != m1.replay_counter):
+            return
+        key_version = _KEY_DESCRIPTOR_VERSION_BY_PMKID_AKM[pkt.akm]
+        if (m1.key_info & KEY_DESCRIPTOR_VERSION_MASK == key_version
+                and pkt.key_info & KEY_DESCRIPTOR_VERSION_MASK == key_version):
+            hs.pmkid_akm = pkt.akm
+
+    def _on_eap_frame(self, pkt: Packet) -> bool:
+        """Record the passively observed EAP method on the AP; never the identity."""
+        if not isinstance(pkt, EapPacket) or pkt.eap_type is None:
+            return False
+        ap = self.access_points.get(pkt.bssid)
+        if ap is not None:
+            ap.observed_eap_methods.add(pkt.eap_type)
+        return True
+
+    def _on_wps_m1_frame(self, pkt: EapolPacket, ap: AccessPoint) -> bool:
+        parsed = WSC.parse_rx_frame(pkt.raw)
+        if parsed is None or parsed.wsc_msg_type != WSC.WPS_M1:
+            return False
+        if not apply_wsc_identity(ap.identity, IdSource.WSC_M1, parsed.attrs):
+            return False
+        ap.wps = True
+        return True
+
+    def decloak(self, ap: AccessPoint, ssid: str, method: str) -> None:
+        """Set ap.ssid to ssid, ignoring a placeholder or empty one. Sets
+        ap.decloak_method to method only while ap has no usable SSID yet, so the
+        first source to name a hidden AP is the one recorded."""
+        if not self._is_real_ssid(ssid):
+            return
+        if not self._is_real_ssid(ap.ssid):
+            ap.decloak_method = method
+        ap.ssid = ssid
+
+    @staticmethod
+    def _is_real_ssid(ssid: Optional[str]) -> bool:
+        """True for a usable SSID (not hidden)."""
+        return bool(ssid) and ssid != "<hidden>"
+
+    @staticmethod
+    def mac_octets(mac: str) -> Optional[bytes]:
+        """The six octets of an ``aa:bb:..``-form MAC, or None if malformed."""
+        parts = mac.split(":")
+        if len(parts) != 6:
+            return None
+        try:
+            return bytes(int(p, 16) for p in parts)
+        except ValueError:
+            return None
+
+    @classmethod
+    def is_sibling(cls, a: bytes, b: bytes) -> bool:
+        """Same-radio heuristic: MACs differ within SIBLING_BIT_DIFF_MAX bits, or one octet."""
+        bit_diff = byte_diff = 0
+        for x, y in zip(a, b):
+            delta = x ^ y
+            if delta:
+                byte_diff += 1
+                bit_diff += bin(delta).count("1")
+        return bit_diff > 0 and (bit_diff <= cls.SIBLING_BIT_DIFF_MAX or byte_diff == 1)
+
+    def _recompute_siblings_for(self, bssid: str) -> None:
+        """Refresh ``bssid``'s sibling links on its channel. Links are symmetric, so only its own
+        list points back at it: tear that down first (covers a roam), then rebuild same-channel."""
+        ap = self.access_points.get(bssid)
+        if ap is None:
+            return
+        for stale in ap.siblings:
+            other = self.access_points.get(stale)
+            if other is not None and bssid in other.siblings:
+                other.siblings.remove(bssid)
+
+        octets = self.mac_octets(bssid)
+        new_siblings: List[str] = []
+        if octets is not None:
+            channel = ap.channel
+            for other_bssid, other_ap in self.access_points.items():
+                if other_bssid == bssid or other_ap.channel != channel:
+                    continue
+                other_octets = self.mac_octets(other_bssid)
+                if other_octets is not None and self.is_sibling(octets, other_octets):
+                    new_siblings.append(other_bssid)
+                    if bssid not in other_ap.siblings:
+                        other_ap.siblings.append(bssid)
+        ap.siblings = new_siblings
+
+    def guessid(self, ap: AccessPoint) -> str:
+        """The alphabetically first SSID among ap's named siblings; "" when none."""
+        sibling_ssids = []
+        for bssid in ap.siblings:
+            sibling = self.access_points.get(bssid)
+            if sibling is not None and not sibling.is_hidden:
+                sibling_ssids.append(sibling.ssid)
+        return min(sibling_ssids, default="")
+
+    # ----- reads / forged-MAC bookkeeping / TX stats -------------------------
+
+    def get_access_points(self) -> List[AccessPoint]:
+        """A list of discovered Access Points."""
+        return list(self.access_points.values())
+
+    def remove_access_point(self, bssid: str) -> Optional[AccessPoint]:
+        """Evict an AP, its clients, and every sibling link that points to it."""
+        key = bssid.lower()
+        ap = self.access_points.pop(key, None)
+        if ap is not None:
+            for sibling_bssid in ap.siblings:
+                sibling = self.access_points.get(sibling_bssid)
+                if sibling is not None and key in sibling.siblings:
+                    sibling.siblings.remove(key)
+            ap.siblings.clear()
+        orphaned_clients = [
+            mac for mac, client in self.clients.items()
+            if client.bssid and client.bssid.lower() == key
+        ]
+        for mac in orphaned_clients:
+            self.clients.pop(mac, None)
+        self.wep_store.remove(key)
+        self.packet_stats.remove(key)
+        return ap
+
+    def dispatch_rx(self, pkt) -> None:
+        """Resolve any next_frame waiters this deduped RX frame matches."""
+        with self._waiters_lock:
+            waiters = list(self._waiters)
+        for match, fut, loop in waiters:
+            if fut.done():
+                continue
+            try:
+                hit = match(pkt)
+            except Exception:
+                hit = False
+            if hit:
+                loop.call_soon_threadsafe(_set_result, fut, pkt)
+
+    async def next_frame(self, match, timeout: float):
+        """Await the first deduped RX frame for which ``match(pkt)`` is true, else None on timeout."""
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        entry = (match, fut, loop)
+        with self._waiters_lock:
+            self._waiters.append(entry)
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            with self._waiters_lock:
+                if entry in self._waiters:
+                    self._waiters.remove(entry)
+
+    async def wait_until(self, condition, timeout: float, poll: float = 0.05) -> bool:
+        """Poll ``condition()`` until it is true or ``timeout`` elapses; returns the final truth."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if condition():
+                return True
+            await asyncio.sleep(poll)
+        return bool(condition())
+
+    def register_own_mac(self, mac) -> str:
+        """Mark ``mac`` as one we transmit as: ingest drops its frames, and it never becomes a client."""
+        mac_str = mac_to_str(mac) if isinstance(mac, (bytes, bytearray)) else str(mac).lower()
+        self.own_macs.add(mac_str)
+        self.clients.pop(mac_str, None)
+        return mac_str
+
+    def unregister_own_mac(self, mac) -> None:
+        """Inverse of ``register_own_mac``."""
+        mac_str = mac_to_str(mac) if isinstance(mac, (bytes, bytearray)) else str(mac).lower()
+        self.own_macs.discard(mac_str)
+
+    # Back-compat alias the campaigns still call; funnels to the single own-MAC set.
+    def register_forged_mac(self, mac) -> None:
+        self.register_own_mac(mac)
+
+    @property
+    def forged_macs(self):
+        """Back-compat alias the UI reads to hide our own STA from client lists."""
+        return self.own_macs
+
+    def record_tx(self, frame_bytes: bytes) -> None:
+        """Classify an outgoing frame for the packet dashboard (deauth vs other). Best-effort."""
+        try:
+            parsed = WlanFrameParser.parse_80211_frame(frame_bytes, 0)
+            if parsed is None:
+                return
+            if logger.isEnabledFor(TRACE):
+                logger.trace("%s", _fmt_frame("TXFRAME", parsed.type,
+                                              parsed.source, parsed.dest, parsed.bssid))
+            bssid = parsed.bssid
+            if bssid and bssid not in ("Unknown", "ff:ff:ff:ff:ff:ff"):
+                self.packet_stats.record_tx(bssid, parsed.type == "deauth")
+        except Exception:
+            pass

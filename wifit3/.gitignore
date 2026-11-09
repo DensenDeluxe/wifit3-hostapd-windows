@@ -1,0 +1,39 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PyInstaller build dir & build scripts
+/build*
+# Executables
+dist/
+
+# Project specifics
+captures/
+driver_sources/
+driver_captures*/
+kali/
+scripts/baseline/*.json
+scripts/baseline/history/
+scratch/
+scratchpad/
+*.log
+# Probe captures (WEP frag/chopchop, WPS, …) — real on-air frames from the
+# user's environment; never commit (see no-SSIDs/BSSIDs-in-commits rule).
+wifit3*.pcap
+scripts/wps/lab_*.pcap
+scripts/wps/lab_results.jsonl

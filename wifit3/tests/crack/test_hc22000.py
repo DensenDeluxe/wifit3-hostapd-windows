@@ -1,0 +1,225 @@
+"""Hashcat ``-m 22000`` hashline format and parser tests."""
+
+from wifit3.crack.hc22000_format import (
+    eapol_hashlines,
+    parse_hc22000,
+    pmkid_hashline,
+    read_hc22000,
+)
+from wifit3.models import HandshakeMessage, Handshake
+
+
+# ---- Test fixtures --------------------------------------------------------------
+
+
+def _eapol_payload(mic: bytes = b"\xFF" * 16, key_data_len: int = 0) -> bytes:
+    """Build a 99-byte (+ key_data) EAPOL payload with a non-zero MIC so we
+    can verify the writer zeros it before hex-encoding."""
+    pl = bytearray(99 + key_data_len)
+    pl[0] = 0x02   # 802.1X version 2
+    pl[1] = 0x03   # 802.1X type = EAPOL-Key
+    pl[2:4] = (95 + key_data_len).to_bytes(2, "big")
+    pl[4] = 0x02   # Key Desc Type = RSN
+    pl[5:7] = b"\x00\x8a"  # Key Info (M1-ish, doesn't matter for format tests)
+    pl[81:97] = mic
+    pl[97:99] = key_data_len.to_bytes(2, "big")
+    return bytes(pl)
+
+
+def _ef(
+    msg_num: int,
+    replay: int = 0,
+    nonce: bytes = None,
+    mic: bytes = None,
+    key_data_len: int = 0,
+    payload_mic: bytes = None,
+) -> HandshakeMessage:
+    nonce = nonce if nonce is not None else bytes(range(32))
+    mic = mic if mic is not None else b"\xAA" * 16
+    payload_mic = payload_mic if payload_mic is not None else mic
+    return HandshakeMessage(
+        raw=b"\x00" * 24,
+        msg_num=msg_num,
+        replay_hex=replay.to_bytes(8, "big").hex(),
+        nonce=nonce,
+        mic=mic,
+        key_data_len=key_data_len,
+        eapol_payload=_eapol_payload(mic=payload_mic, key_data_len=key_data_len),
+    )
+
+
+def _hs(ssid: str = "TestNet", *frames, with_beacon: bool = True, pmkid: bytes = None) -> Handshake:
+    hs = Handshake(
+        bssid="aa:bb:cc:dd:ee:ff",
+        client_mac="11:22:33:44:55:66",
+        beacon_frame=b"BEACON" if with_beacon else None,
+        pmkid=pmkid,
+    )
+    hs.messages.extend(frames)
+    return hs
+
+
+# ---- PMKID hashline -------------------------------------------------------------
+
+
+def test_pmkid_hashline_basic():
+    pmkid = bytes.fromhex("ad2fad48da558cdfeb19cea25e2ce5af")
+    hs = _hs(pmkid=pmkid)
+    line = pmkid_hashline("MyWiFi", hs)
+    expected = (
+        "WPA*01"
+        f"*{pmkid.hex()}"
+        "*aabbccddeeff"
+        "*112233445566"
+        f"*{b'MyWiFi'.hex()}"
+        "***"
+    )
+    assert line == expected
+
+
+def test_pmkid_hashline_marks_psk_sha256_pmkid():
+    """AKM 6 PMKID is HMAC-SHA256: hashcat reads that from MESSAGEPAIR bit 0x02, written "03"."""
+    pmkid = bytes.fromhex("ad2fad48da558cdfeb19cea25e2ce5af")
+    hs = _hs(pmkid=pmkid)
+    hs.pmkid_akm = 6
+    line = pmkid_hashline("MyWiFi", hs)
+    assert line == f"WPA*01*{pmkid.hex()}*aabbccddeeff*112233445566*{b'MyWiFi'.hex()}***03"
+    assert parse_hc22000(line).message_pair == "03"
+
+
+def _ft_m2() -> HandshakeMessage:
+    m2 = _ef(2, replay=5, key_data_len=22)
+    m2.akm = 4
+    m2.mdid, m2.r0khid, m2.r1khid = b"\x12\x34", b"r0kh", bytes.fromhex("020000000001")
+    return m2
+
+
+def test_ft_pmkid_hashline_has_empty_message_pair_and_ft_identifiers():
+    pmkid = b"\x11" * 16
+    hs = _hs("Net", _ft_m2(), pmkid=pmkid)
+    hs.pmkid_akm = 4
+    line = pmkid_hashline("Net", hs)
+    assert line == (f"WPA*03*{pmkid.hex()}*aabbccddeeff*112233445566*{b'Net'.hex()}***"
+                    f"*1234*{b'r0kh'.hex()}*020000000001")
+    assert parse_hc22000(line).kind == "03"
+
+
+def test_ft_pmkid_hashline_none_without_ft_identifiers():
+    hs = _hs("Net", pmkid=b"\x11" * 16)
+    hs.pmkid_akm = 4
+    assert pmkid_hashline("Net", hs) is None
+
+
+def test_pmkid_hashline_none_when_no_pmkid():
+    hs = _hs()
+    assert pmkid_hashline("X", hs) is None
+
+
+def test_pmkid_hashline_none_when_no_ssid():
+    hs = _hs(pmkid=b"\x00" * 16)
+    assert pmkid_hashline("", hs) is None
+
+
+def test_pmkid_hashline_rejects_wrong_length():
+    hs = _hs(pmkid=b"\x00" * 15)  # malformed
+    assert pmkid_hashline("X", hs) is None
+
+
+# ---- EAPOL hashlines ------------------------------------------------------------
+
+
+def test_eapol_hashlines_one_line_per_instance():
+    """A client that completes the 4-way twice (distinct ANonce / replay base)
+    yields two independently-crackable WPA*02 lines, not one."""
+    a1 = b"\xA0" + b"\x00" * 31
+    a2 = b"\xB0" + b"\x00" * 31
+    hs = _hs(
+        "Net",
+        _ef(1, replay=5, nonce=a1),
+        _ef(2, replay=5, nonce=b"\x11" + b"\x00" * 31, key_data_len=22),
+        _ef(1, replay=9, nonce=a2),
+        _ef(2, replay=9, nonce=b"\x22" + b"\x00" * 31, key_data_len=22),
+    )
+    lines = eapol_hashlines("Net", hs)
+    assert len(lines) == 2
+    assert {ln.split("*")[6] for ln in lines} == {a1.hex(), a2.hex()}  # ANonces
+    # Every line is structurally valid: WPA, type 02, 9 *-separated fields.
+    for ln in lines:
+        fields = ln.split("*")
+        assert fields[0] == "WPA" and fields[1] == "02" and len(fields) == 9
+
+
+def test_parse_hc22000_pmkid():
+    line = "WPA*01*4e0828e60a163e469f49e6b77e669086*001122334455*aabbccddeeff*486f6d65***"
+    parsed = parse_hc22000(line)
+    assert parsed is not None
+    assert parsed.kind == "01"
+    assert parsed.pmkid_or_mic == "4e0828e60a163e469f49e6b77e669086"
+    assert parsed.mac_ap == "001122334455"
+    assert parsed.mac_sta == "aabbccddeeff"
+    assert parsed.essid == "486f6d65"
+    assert parsed.anonce == ""
+
+
+def test_parse_hc22000_eapol():
+    line = "WPA*02*aabbccddeeff00112233445566778899*001122334455*aabbccddeeff*486f6d65*1122334455667788990011223344556677889900112233445566778899001122*01020304*02"
+    parsed = parse_hc22000(line)
+    assert parsed is not None
+    assert parsed.kind == "02"
+    assert parsed.pmkid_or_mic == "aabbccddeeff00112233445566778899"
+    assert parsed.mac_ap == "001122334455"
+    assert parsed.mac_sta == "aabbccddeeff"
+    assert parsed.essid == "486f6d65"
+    assert parsed.anonce == "1122334455667788990011223344556677889900112233445566778899001122"
+    assert parsed.eapol == "01020304"
+    assert parsed.message_pair == "02"
+
+
+_COMMON = "11" * 16 + "*020000000001*020000000002*486f6d65"
+
+
+def test_parse_hc22000_ft_records():
+    ft_pmkid = parse_hc22000(f"WPA*03*{_COMMON}****1234*7230*7231")
+    assert ft_pmkid is not None and ft_pmkid.kind == "03"
+    assert (ft_pmkid.mdid, ft_pmkid.r0khid, ft_pmkid.r1khid) == ("1234", "7230", "7231")
+    ft_eapol = parse_hc22000(f"WPA*04*{_COMMON}*{'22' * 32}*01020304*80*1234*7230*7231")
+    assert ft_eapol is not None and ft_eapol.kind == "04" and ft_eapol.message_pair == "80"
+
+
+def test_parse_hc22000_rejects_field_count_kind_mismatch():
+    assert parse_hc22000(f"WPA*04*{_COMMON}*{'22' * 32}*0102*80") is None          # FT without FT fields
+    assert parse_hc22000(f"WPA*02*{_COMMON}*{'22' * 32}*0102*80*1234*7230*7231") is None
+    assert parse_hc22000(f"WPA*03*{_COMMON}****1234**7231") is None                 # empty R0KH-ID
+    assert parse_hc22000(f"WPA*05*{_COMMON}***") is None
+
+
+def test_parse_hc22000_malformed():
+    assert parse_hc22000("") is None
+    assert parse_hc22000("NOTWPA*01*abc*def") is None
+    assert parse_hc22000("WPA*01*short") is None
+
+
+def test_eapol_message_pair_and_authorized_read_bits_0_to_2():
+    def eapol(pair: str):
+        return parse_hc22000(f"WPA*02*{_COMMON}*{'22' * 32}*01020304*{pair}")
+    assert [eapol(p).eapol_message_pair for p in ("00", "80", "a2", "05")] == [0, 0, 2, 5]
+    assert [eapol(p).authorized for p in ("00", "80", "a2", "01")] == [False, False, True, True]
+    assert [eapol(p).pair_label for p in ("80", "01", "a2", "05", "07")] == [
+        "M1+M2", "M1+M4", "M2+M3", "M3+M4", "M??"]
+    pmkid = parse_hc22000(f"WPA*01*{_COMMON}***03")
+    assert pmkid.is_pmkid and pmkid.authorized and pmkid.pair_label == "PMKID"
+    assert pmkid.eapol_message_pair is None and pmkid.message_pair_bits == 3
+
+
+def test_read_hc22000_keeps_valid_lines_stripped(tmp_path):
+    line = f"WPA*01*{_COMMON}***"
+    path = tmp_path / "x.hc22000"
+    path.write_text(f"  {line}  \nnot a hashline\n\n", encoding="utf-8")
+    assert [(raw, parsed.kind) for raw, parsed in read_hc22000(path)] == [(line, "01")]
+    assert read_hc22000(tmp_path / "missing.hc22000") == []
+
+
+def test_ssid_decodes_the_essid_field():
+    assert parse_hc22000(f"WPA*01*{_COMMON}***").ssid == "Home"
+    not_utf8 = _COMMON.replace("486f6d65", "48ff")
+    assert parse_hc22000(f"WPA*01*{not_utf8}***").ssid == "H�"
