@@ -25,10 +25,14 @@ establish complete production hostapd parity. Ethernet, VLAN, FT-over-DS/RRB,
 hardware station offload, hardware key offload, and production radio timing
 are not included in the acceptance claim.
 
-An external Ubuntu client using the AWUS036ACHM completed the WPA2 four-way
-handshake against the Windows AP after active-monitor link acknowledgements
-were enabled automatically for the supported radio. The client remained in
-the completed WPA state for 66.3 seconds until the timed AP run ended.
+An external Ubuntu 26.04.1 LTS client using an AWUS036ACHM completed OTA
+interoperability runs for WPA2-Personal/CCMP, WPA2-Personal with required
+PMF/BIP-CMAC-128, and WPA3-SAE/H2E group 19. The three runs completed 6, 4,
+and 4 client connections respectively, including 5, 3, and 3 controlled
+reconnects. The WPA2 baseline remained connected for 183.8 seconds after its
+final reconnect. All six WPA3-SAE/H2E stability samples remained connected
+over a 50-second observation window. The AP smoke runner automatically armed
+active-monitor link acknowledgements in each run.
 
 The integrated Windows WLAN client completed one cached-SSID diagnostic
 association. A separate six-radio fresh-SSID matrix produced 0/6 discoveries
@@ -354,39 +358,69 @@ not as a failure of the previously verified raw-observer WPA and EAP matrices.
 
 ## 9. Native Linux client interoperability
 
-The external Ubuntu host provided wired control access. The tested WLAN device
-was an Alfa AWUS036ACHM using the MediaTek MT7610U chipset, USB identifier
-`0e8d:7610`, and the native Linux `mt76x0u` driver. The Windows AP used radio
-index 0 (MT7925AU / Netgear A9000), channel 1 (2412 MHz), WPA2-Personal, and
-CCMP. The wired Ethernet connection carried SSH control only; Ethernet
-bridging, VLAN, and IP data-plane behavior were excluded.
+The external Ubuntu host provided wired control access. The WLAN station was
+an Alfa AWUS036ACHM using the MediaTek MT7610U chipset, USB identifier
+`0e8d:7610`, and the native Linux `mt76x0u` driver. The client environment was
+Ubuntu 26.04.1 LTS, kernel `7.0.0-43-generic`, with `wpa_supplicant v2.11`.
+The Windows AP used radio index 0 (MT7925AU / Netgear A9000), BSSID
+`28:94:01:d1:85:5d`, and channel 1 (2412 MHz). The wired Ethernet connection
+carried SSH control only. Ethernet bridging, VLAN, and IP data-plane behavior
+were excluded.
 
-The initial WPA2 client attempt without active-monitor link acknowledgements
-stalled after AP-side M1 transmissions. With the ACK-capable public wifit3 API
-turned on, the same client completed the exchange. The final smoke run omitted
-the `--hardware-ack` option; the runner detected the selected adapter APIs and
-armed active-monitor link acknowledgements automatically.
+Each security mode used a fresh SSID and an ephemeral test credential. The
+Ubuntu station used a dedicated direct `wpa_supplicant` process. The Windows
+AP runner omitted the explicit `--hardware-ack` option; it detected the
+selected adapter's public ACK API and armed active-monitor link
+acknowledgements automatically. All three runs reported
+`hardware_ack_armed=True`, `ap_enabled=True`, and `fatal_failure=False`.
+All client profiles selected RSN and CCMP. WPA2 used `key_mgmt=WPA-PSK`; the
+PMF run additionally required `ieee80211w=2` and BIP-CMAC-128. WPA3 used
+`key_mgmt=SAE`, required PMF, H2E-only password-element derivation
+(`sae_pwe=1`), and SAE group 19. Controlled reconnects used
+`wpa_cli disconnect` followed by `wpa_cli reconnect`; each was accepted only
+after the client returned to `wpa_state=COMPLETED`. Ephemeral credentials
+and client profiles were removed from the Ubuntu host after the campaign.
 
-| Test criterion | Result | Evidence |
-|---|---:|---|
-| Beacon and SSID discovery | PASS | Ubuntu `iw` scan returned the temporary SSID and RSN parameters |
-| Authentication and association | PASS | hostapd recorded successful authentication and association |
-| WPA four-way handshake | PASS | M2 and M4 received; hostapd reached `PTKINITDONE` |
-| Key installation | PASS | Three key slots reported by the AP smoke runner |
-| Client WPA state | PASS | `wpa_state=COMPLETED`, WPA2-PSK, CCMP |
-| Connected-state stability | PASS | `CTRL-EVENT-CONNECTED` to AP-shutdown disconnect: 66.3 s |
-| Fatal hostapd process failure | PASS | `fatal_failure=False` at timed-run completion |
-| IP/data-plane connectivity | NOT TESTED | Ethernet and VLAN were out of scope |
+| Security mode | AP duration | Client result | AP-side result |
+|---|---:|---|---|
+| WPA2-Personal, CCMP | 240 s | 6 completed connections: initial association plus 5/5 controlled reconnects. After the fifth reconnect, `wpa_state=COMPLETED` persisted for 183.806 s until AP shutdown. Ten of twelve 15-second samples were completed; the final two were taken after AP shutdown. | M1–M4 completed; 3 key slots; active-monitor ACK count 12; no fatal process failure. |
+| WPA2-Personal, required PMF, BIP-CMAC-128 | 90 s | 4 completed connections: initial association plus 3/3 controlled reconnects. `wpa_state=COMPLETED`, `key_mgmt=WPA2-PSK`, and CCMP were reported. | M1–M4 completed; 5 key slots including IGTK state; active-monitor ACK count 26; no fatal process failure. One SA Query timeout was logged during the controlled reconnect sequence; the subsequent association and key exchange completed. |
+| WPA3-Personal, SAE/H2E, group 19, required PMF | 120 s | 4 completed connections: initial association plus 3/3 controlled reconnects. Six samples at 10-second intervals all reported `wpa_state=COMPLETED`; measured signal was −14 to −15 dBm. | H2E derivation and SAE confirm succeeded; M1–M4 completed; 5 key slots including IGTK state; active-monitor ACK count 27; no fatal process failure. One non-fatal beacon-task warning appeared at shutdown. |
 
-The Linux supplicant logged successful key negotiation and connection. The
-66.3-second connected interval ended when the time-limited AP smoke process
-stopped; the client then returned to scanning. This is evidence for the tested
-client, adapter, AP radio, channel, and WPA2 configuration. It does not
-establish universal client compatibility or production-duration stability.
+The initial WPA2 run without active-monitor link acknowledgements had stalled
+after AP-side M1 transmission. With automatic link acknowledgements enabled,
+the Ubuntu client completed the WPA2 exchange. The expanded WPA2 baseline
+recorded six completed client sessions, and the connection remained completed
+for 183.806 seconds after the final controlled reconnect. Samples 11 and 12
+were collected after the time-limited AP had stopped and the station returned
+to scanning; they are not counted as connected-state samples.
 
-NetworkManager was not used as acceptance evidence. The WLAN test used a direct
-`wpa_supplicant` control path, while the wired Ethernet connection remained
-available for remote control throughout the test.
+For WPA2 with PMF required, the AP installed IGTK state and the Ubuntu
+supplicant completed the WPA handshake after each of three controlled
+reconnects. The AP logged an SA Query timeout during this sequence, followed
+by a successful reassociation and completed key exchange. This event is
+reported as an observed reconnect-path limitation; it did not prevent the
+client from reaching `COMPLETED`.
+
+For WPA3-SAE/H2E, the AP log recorded H2E key derivation, successful SAE
+confirmation, and completion of the four-way handshake. Three controlled
+reconnects completed, followed by six successful samples collected 10 seconds
+apart. No client disconnect event occurred between the final reconnect and
+the timed AP shutdown. The six samples establish a 50-second connected-state
+observation window, not production-duration stability.
+
+The SAE runner also emitted `software beacon transmission failed; stopping`
+during final shutdown. The process returned exit status zero with
+`fatal_failure=False`. Source-path analysis indicates a teardown race: the
+test lease is revoked before the asynchronous beacon task is cancelled, so a
+beacon already scheduled at shutdown can be reported as a failed send. No
+beacon-loss evidence was recorded during the connected-state observation
+window; the shutdown warning remains a cleanup-path observation.
+
+These outcomes apply to the tested Ubuntu supplicant, AWUS036ACHM adapter,
+Windows AP radio, channel, and security profiles. The wired connection was
+used only for remote control. No IP connectivity, Ethernet bridging, VLAN,
+throughput, roaming, power-save, or multi-client behavior was tested.
 
 ## 10. Management, accounting, and RADIUS evidence
 
@@ -432,9 +466,9 @@ sequence numbers, `get_seqnum`, noack probe responses, and receive
 backpressure. Those corrections were checked with the local regression.
 The EAPOL receive parser also accounts for bounded DMA alignment padding
 before LLC/SNAP. The smoke runner now automatically enables the public
-active-monitor link-ACK API when supported by the selected radio. The external
-Ubuntu AWUS036ACHM retest completed M1–M4 and remained connected for 66.3
-seconds until the timed AP shutdown.
+active-monitor link-ACK API when supported by the selected radio. The expanded
+Ubuntu client campaign is documented in section 9 and covers WPA2-Personal,
+WPA2 with required PMF, and WPA3-SAE/H2E on the current native executable.
 The native executable was then rebuilt, as identified in section 4, so the
 driver acknowledgement, `get_seqnum`, and TX-status changes are in
 `hostapd.exe`. The six-radio OTA matrix and the Windows fresh-SSID run were
@@ -459,7 +493,10 @@ Ethernet/VLAN, hardware offload, FT-over-DS/RRB, and production radio behavior
 remain outside the demonstrated scope. Standard Windows-client discovery
 remains conditional: one cached-SSID diagnostic association succeeded, while
 the fresh-SSID matrix remained 0/6. The external Ubuntu AWUS036ACHM completed
-WPA2 M1–M4 with automatically enabled link acknowledgements and remained
-connected for 66.3 seconds until the timed AP shutdown. This verifies the
-tested Linux client and radio configuration, not universal interoperability
+WPA2, required-PMF WPA2, and WPA3-SAE/H2E client runs with automatically
+enabled link acknowledgements. Five WPA2 reconnects, three PMF reconnects,
+and three SAE/H2E reconnects completed. A PMF SA Query timeout was observed
+during controlled reconnection, followed by successful association and key
+installation. These results verify interoperability for the tested Linux
+client and radio configuration; they do not establish universal compatibility
 or production-duration stability.

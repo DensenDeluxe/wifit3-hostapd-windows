@@ -22,13 +22,20 @@ offload, hardware station-table offload, FT-over-DS/RRB, and production-grade
 radio timing remain outside the verified scope. Ethernet and VLAN are
 intentionally excluded from this project.
 
-An external Ubuntu client using the AWUS036ACHM completed the WPA2 four-way
-handshake against the Windows AP and remained connected for 66.3 seconds until
-the timed AP run ended. The Windows 11 WLAN client completed one diagnostic
-WPA2 association with a cached SSID, while a six-radio fresh-SSID matrix
-produced 0/6 discoveries and 0/6 associations. Linux-client interoperability
-is verified for the tested adapter and configuration; repeatable Windows-client
-discovery remains unverified.
+An external Ubuntu 26.04.1 LTS client using the AWUS036ACHM completed
+WPA2-Personal/CCMP, WPA2 with required PMF/BIP-CMAC-128, and WPA3-SAE/H2E
+group 19 runs against the Windows AP. The campaign completed 6 WPA2
+connections including 5 controlled reconnects, 4 PMF connections including
+3 reconnects, and 4 SAE/H2E connections including 3 reconnects. Six SAE/H2E
+stability samples over 50 seconds remained in the completed state. One PMF
+SA Query timeout was observed during a controlled reconnect, followed by
+successful reassociation and key exchange. The SAE runner emitted one
+non-fatal beacon-task warning during shutdown, with no corresponding failure
+in the connected-state sample window. The Windows 11 WLAN client
+completed one diagnostic association with a cached SSID, while a six-radio
+fresh-SSID matrix produced 0/6 discoveries and 0/6 associations. Linux-client
+interoperability is verified for the tested adapter and configuration;
+repeatable Windows-client discovery remains unverified.
 
 ## Build status
 
@@ -65,7 +72,7 @@ real-radio end-to-end verification.
 | Deauthentication and disassociation | Native MLME callbacks with bounded retry | Broadcast and unicast tests, 6/6 per operation | Experimental laboratory path |
 | WPA2-Personal / CCMP | Software CCMP, PTK/GTK lifecycle | Complete M1–M4 OTA verification | Experimental laboratory path |
 | Windows 11 standard WLAN client | Temporary `netsh wlan` WPA2 profile path | Cached-SSID diagnostic 1/1; fresh-SSID matrix 0/6 | Conditional; repeatable discovery not verified |
-| Ubuntu standard WLAN client | AWUS036ACHM using native `mt76x0u`; WPA2-Personal/CCMP | M1–M4 complete; `wpa_state=COMPLETED`; 66.3 s until timed AP shutdown | Verified for tested configuration |
+| Ubuntu standard WLAN client | Ubuntu 26.04.1 LTS; `wpa_supplicant v2.11`; AWUS036ACHM using native `mt76x0u`; WPA2-CCMP, required-PMF WPA2, WPA3-SAE/H2E group 19 | WPA2: 6 sessions, 5/5 reconnects, 183.806 s after final reconnect; PMF: 4 sessions, 3/3 reconnects; SAE/H2E: 4 sessions, 3/3 reconnects and 6/6 completed samples over 50 s; AP fatal failure false | Verified for tested configuration; one PMF SA Query timeout and one non-fatal SAE shutdown beacon warning observed |
 | WPA2-Personal / TKIP | Software TKIP, Michael, RC4, ICV, and replay protection | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-128 | Software AES-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-256 | Software AES-256-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
