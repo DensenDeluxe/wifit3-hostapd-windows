@@ -50,6 +50,14 @@ _LLC_EAPOL = b'\xaa\xaa\x03\x00\x00\x00\x88\x8e'
 _WPA_STA_MFP = 1 << 3
 
 
+def hardware_ack_supported(iface) -> bool:
+    driver = getattr(iface, 'driver', None)
+    support = getattr(getattr(driver, 'FAKE_MAC', None), 'value', None)
+    return (support in ('spoofable', 'fixed_mac') and
+            all(callable(getattr(iface, name, None))
+                for name in ('set_fake_mac', 'enable_rx_acks', 'send_until_ack')))
+
+
 def mhz_to_channel(freq: int) -> int:
     if freq == 2484:
         return 14
@@ -88,9 +96,10 @@ def extract_eapol_from_mpdu(frame: bytes) -> tuple[bytes, bytes] | None:
         hdrlen += 2
         if fc & 0x8000:
             hdrlen += 4
-    if len(frame) < hdrlen + 8 or frame[hdrlen:hdrlen + 8] != _LLC_EAPOL:
+    eapol_offset = frame[hdrlen:hdrlen + 16].find(_LLC_EAPOL)
+    if eapol_offset < 0:
         return None
-    payload = frame[hdrlen + 8:]
+    payload = frame[hdrlen + eapol_offset + len(_LLC_EAPOL):]
     if len(payload) < 4:
         return None
     return frame[10:16], payload

@@ -22,11 +22,13 @@ offload, hardware station-table offload, FT-over-DS/RRB, and production-grade
 radio timing remain outside the verified scope. Ethernet and VLAN are
 intentionally excluded from this project.
 
-The integrated Windows 11 WLAN client completed one diagnostic WPA2 association
-when using an SSID already present in the Windows scan cache. A six-radio fresh-
-SSID acceptance matrix produced 0/6 Windows discoveries and 0/6 standard-client
-associations. Standard-client interoperability is therefore conditional and is
-not classified as a verified repeatable capability.
+An external Ubuntu client using the AWUS036ACHM completed the WPA2 four-way
+handshake against the Windows AP and remained connected for 66.3 seconds until
+the timed AP run ended. The Windows 11 WLAN client completed one diagnostic
+WPA2 association with a cached SSID, while a six-radio fresh-SSID matrix
+produced 0/6 discoveries and 0/6 associations. Linux-client interoperability
+is verified for the tested adapter and configuration; repeatable Windows-client
+discovery remains unverified.
 
 ## Build status
 
@@ -37,7 +39,7 @@ not classified as a verified repeatable capability.
 | wifit3 driver bridge | Verified experimentally | Authenticated local TCP IPC and six-radio matrix |
 | UDP control interface | Verified | Control smoke and `hostapd_cli` responses |
 | Windows idle event loop | Verified | Timer-only and control-socket tests |
-| Python bridge regression | Verified | 164 tests passed |
+| Python bridge regression | Verified | 166 tests passed |
 | Python bytecode compilation | Verified | `compileall` completed without errors |
 
 ## Native EAP build profile
@@ -58,11 +60,12 @@ real-radio end-to-end verification.
 | Capability | Implementation state | OTA evidence | Classification |
 |---|---|---|---|
 | Open AP and beacon submission | Software beacon path over wifit3 TX | Six-radio AP startup matrix | Experimental laboratory path |
-| Active monitor and link ACK | Opt-in `set_fake_mac`, `enable_rx_acks`, and `send_until_ack` path | Open-system association on 6/6 radios | Experimental laboratory path |
+| Active monitor and link ACK | Automatically enabled when the adapter exposes `set_fake_mac`, `enable_rx_acks`, and `send_until_ack` | WPA2 M1–M4 with an external Linux client; three key slots installed | Experimental laboratory path |
 | Station add, update, authorization, and removal | Software station store plus hostapd callbacks | Unit, bridge, and OTA management tests | Experimental laboratory path |
 | Deauthentication and disassociation | Native MLME callbacks with bounded retry | Broadcast and unicast tests, 6/6 per operation | Experimental laboratory path |
 | WPA2-Personal / CCMP | Software CCMP, PTK/GTK lifecycle | Complete M1–M4 OTA verification | Experimental laboratory path |
 | Windows 11 standard WLAN client | Temporary `netsh wlan` WPA2 profile path | Cached-SSID diagnostic 1/1; fresh-SSID matrix 0/6 | Conditional; repeatable discovery not verified |
+| Ubuntu standard WLAN client | AWUS036ACHM using native `mt76x0u`; WPA2-Personal/CCMP | M1–M4 complete; `wpa_state=COMPLETED`; 66.3 s until timed AP shutdown | Verified for tested configuration |
 | WPA2-Personal / TKIP | Software TKIP, Michael, RC4, ICV, and replay protection | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-128 | Software AES-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
 | WPA2-Personal / GCMP-256 | Software AES-256-GCM and key lifecycle | Complete controlled OTA matrix, 6/6 | Experimental laboratory path |
@@ -135,6 +138,8 @@ the laboratory path that matrix exercised:
 - `get_seqnum` returns the last used PN, TSC or IPN as 6 little-endian octets. An unused key reports 0. Key-install sequences are read little-endian.
 - A management frame marked noack, including a probe response to a wildcard broadcast probe, is submitted without waiting for a link ACK. An armed link-ACK wait that sees no ACK is reported with TX status ack=0. Successful submission without an ACK tally is still reported as ack=1, because hostapd otherwise does not complete association.
 - The Windows driver drains queued receive frames and reads each command until its acknowledgement. Receive delivery does not block the radio asyncio thread.
+- The Windows smoke runner automatically arms active-monitor link acknowledgements on adapters that expose the complete public wifit3 ACK API. This permits standard clients to complete the WPA four-way handshake on the tested radio.
+- The raw EAPOL receive parser locates LLC/SNAP EAPOL within a bounded 16-byte post-802.11 window to accommodate DMA alignment padding.
 
 ## Reproducibility and evidence
 
@@ -151,7 +156,7 @@ bytes, and were not repeated.
 | Executable | `hostapd-2.12/hostapd/hostapd.exe` |
 | Executable size | 7,486,834 bytes |
 | SHA-256 | `2D7A610D36ADC956B2F31686AFBFC6589D6EA4D9974851FDC2BCB52B1D6A8A34` |
-| Python regression | 164 passed |
+| Python regression | 166 passed |
 | Python compilation | Passed |
 
 ## References

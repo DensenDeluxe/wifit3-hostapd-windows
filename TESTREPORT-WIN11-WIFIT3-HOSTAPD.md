@@ -15,7 +15,7 @@ integrity, bridge operation, AP startup, station management, WPA key lifecycle,
 RADIUS/EAP control paths, and OTA client interoperability.
 
 The build is functional for the experimentally verified laboratory scope. The
-most recent local regression contains 164 passing tests. Controlled OTA tests
+most recent local regression contains 166 passing tests. Controlled OTA tests
 verified WPA2-Personal, WPA3-SAE, PMF/BIP, FT-SAE, FT-SAE-EXT-KEY, EAP-TLS,
 EAP-MSCHAPv2, EAP-PSK, EAP-SAKE, EAP-PAX, EAP-GPSK, EAP-GPSK-SHA256, EAP-PWD,
 EAP-SIM, EAP-AKA, EAP-AKA', PEAPv1/MSCHAPv2,
@@ -25,10 +25,16 @@ establish complete production hostapd parity. Ethernet, VLAN, FT-over-DS/RRB,
 hardware station offload, hardware key offload, and production radio timing
 are not included in the acceptance claim.
 
-An external Ubuntu client using the AWUS036ACHM reached beacon discovery,
-authentication, and association against the Windows AP. The WPA2 four-way
-handshake did not complete because the client-side M2 was not observed; the
-Linux-client run is therefore classified as partial interoperability evidence.
+An external Ubuntu client using the AWUS036ACHM completed the WPA2 four-way
+handshake against the Windows AP after active-monitor link acknowledgements
+were enabled automatically for the supported radio. The client remained in
+the completed WPA state for 66.3 seconds until the timed AP run ended.
+
+The integrated Windows WLAN client completed one cached-SSID diagnostic
+association. A separate six-radio fresh-SSID matrix produced 0/6 discoveries
+and 0/6 associations. Linux-client interoperability is verified for the tested
+adapter and configuration; repeatable Windows-client discovery remains
+unverified.
 
 ## 1. Objective and scope
 
@@ -126,7 +132,7 @@ of the expanded native binary.
 
 | Check | Result |
 |---|---:|
-| `pytest -q` | 164 passed |
+| `pytest -q` | 166 passed |
 | `python -m compileall -q wifit3_bridge` | Passed |
 | Native hostapd build | Passed |
 | `hostapd.exe -v` | hostapd 2.12 |
@@ -348,38 +354,39 @@ not as a failure of the previously verified raw-observer WPA and EAP matrices.
 
 ## 9. Native Linux client interoperability
 
-The Ubuntu client was an external Linux host connected through Ethernet for
-control access. The tested WLAN device was an Alfa AWUS036ACHM with MediaTek
-MT7610U chipset, USB identifier `0e8d:7610`, and the native Linux `mt76x0u`
-driver. The Windows AP used radio index 0 (MT7925AU / Netgear A9000), channel 1,
-WPA2-Personal with CCMP, and a temporary SSID and passphrase. No Ethernet
-bridge, VLAN, or IP data-plane path was included.
+The external Ubuntu host provided wired control access. The tested WLAN device
+was an Alfa AWUS036ACHM using the MediaTek MT7610U chipset, USB identifier
+`0e8d:7610`, and the native Linux `mt76x0u` driver. The Windows AP used radio
+index 0 (MT7925AU / Netgear A9000), channel 1 (2412 MHz), WPA2-Personal, and
+CCMP. The wired Ethernet connection carried SSH control only; Ethernet
+bridging, VLAN, and IP data-plane behavior were excluded.
 
-The client was tested with the native Linux `iw` scan path and a direct
-`wpa_supplicant` control path. NetworkManager was not used as acceptance
-evidence because the non-interactive SSH test session could not provide its
-secret-agent transaction reliably.
+The initial WPA2 client attempt without active-monitor link acknowledgements
+stalled after AP-side M1 transmissions. With the ACK-capable public wifit3 API
+turned on, the same client completed the exchange. The final smoke run omitted
+the `--hardware-ack` option; the runner detected the selected adapter APIs and
+armed active-monitor link acknowledgements automatically.
 
 | Test criterion | Result | Evidence |
 |---|---:|---|
-| Beacon and SSID discovery | PASS | `iw` scan returned the temporary SSID and RSN parameters |
-| Authentication exchange | PASS | hostapd recorded authentication for the Linux station |
-| Association exchange | PASS | hostapd recorded successful association |
-| WPA four-way handshake | FAIL | hostapd transmitted repeated M1 frames; M2 was not observed |
-| Authorized port state | FAIL | no completed four-way handshake or authorized station state |
-| IP/data-plane connectivity | NOT TESTED | no authorized port; Ethernet and VLAN were out of scope |
-| Fatal hostapd process failure | PASS | no fatal process termination occurred during the run |
+| Beacon and SSID discovery | PASS | Ubuntu `iw` scan returned the temporary SSID and RSN parameters |
+| Authentication and association | PASS | hostapd recorded successful authentication and association |
+| WPA four-way handshake | PASS | M2 and M4 received; hostapd reached `PTKINITDONE` |
+| Key installation | PASS | Three key slots reported by the AP smoke runner |
+| Client WPA state | PASS | `wpa_state=COMPLETED`, WPA2-PSK, CCMP |
+| Connected-state stability | PASS | `CTRL-EVENT-CONNECTED` to AP-shutdown disconnect: 66.3 s |
+| Fatal hostapd process failure | PASS | `fatal_failure=False` at timed-run completion |
+| IP/data-plane connectivity | NOT TESTED | Ethernet and VLAN were out of scope |
 
-The run demonstrates interoperability through beacon discovery, open-system
-authentication, and association. It does not demonstrate WPA2 client
-interoperability because the exchange stopped after the AP-side M1. The
-observed failure boundary is therefore between association completion and
-receipt of the client-side WPA M2. Additional packet-level capture of both
-directions is required to distinguish client reception, EAPOL delivery, and
-raw-radio transmission timing as the limiting factor.
+The Linux supplicant logged successful key negotiation and connection. The
+66.3-second connected interval ended when the time-limited AP smoke process
+stopped; the client then returned to scanning. This is evidence for the tested
+client, adapter, AP radio, channel, and WPA2 configuration. It does not
+establish universal client compatibility or production-duration stability.
 
-After testing, the Linux NetworkManager state, temporary profiles, temporary
-control directory, and wifit3 MT7610U module reservation were restored.
+NetworkManager was not used as acceptance evidence. The WLAN test used a direct
+`wpa_supplicant` control path, while the wired Ethernet connection remained
+available for remote control throughout the test.
 
 ## 10. Management, accounting, and RADIUS evidence
 
@@ -404,7 +411,7 @@ raw-radio, authentication, key, and management criteria.
    compile and link without a completed client exchange. No EAP method listed
    in the current Enterprise matrix remains in this category.
 3. **Out of scope or not verified:** Ethernet, VLAN, hardware offload,
-   FT-over-DS/RRB, and production stability conditions.
+   FT-over-DS/RRB, multi-client behavior, and production-duration stability.
 
 The full list is maintained in `hostapd-2.12/PORT_STATUS.md`.
 
@@ -423,6 +430,11 @@ After that matrix, the bridge source was corrected for the CCMP/GCMP
 additional authentication data, software TIM insertion, per-transmitter
 sequence numbers, `get_seqnum`, noack probe responses, and receive
 backpressure. Those corrections were checked with the local regression.
+The EAPOL receive parser also accounts for bounded DMA alignment padding
+before LLC/SNAP. The smoke runner now automatically enables the public
+active-monitor link-ACK API when supported by the selected radio. The external
+Ubuntu AWUS036ACHM retest completed M1–M4 and remained connected for 66.3
+seconds until the timed AP shutdown.
 The native executable was then rebuilt, as identified in section 4, so the
 driver acknowledgement, `get_seqnum`, and TX-status changes are in
 `hostapd.exe`. The six-radio OTA matrix and the Windows fresh-SSID run were
@@ -439,12 +451,15 @@ interoperability with every external client implementation.
 The modified hostapd 2.12 build functions on the specified Windows 11 system
 over wifit3 for the experimentally verified AP, station, WPA, PMF, RADIUS, and
 Enterprise OTA paths listed in this report. The expanded native build is
-reproducible and passes the 164-test local regression. EAP-FAST/MSCHAPv2,
-EAP-TEAP/MSCHAPv2, EAP-EKE, and EAP-IKEv2 are verified on all six radios. Full hostapd functionality
-under Windows cannot be claimed because Ethernet/VLAN, hardware offload,
-FT-over-DS/RRB, and production radio behavior remain outside the demonstrated
-scope. Standard Windows-client discovery remains conditional: one cached-SSID
-diagnostic association succeeded, whereas the fresh-SSID matrix remained 0/6.
-The external Ubuntu client passed discovery, authentication, and association
-but did not complete the WPA2 four-way handshake; full external-client
-interoperability therefore remains unverified.
+reproducible and passes the 166-test local regression. EAP-FAST/MSCHAPv2,
+EAP-TEAP/MSCHAPv2, EAP-EKE, and EAP-IKEv2 are verified on all six radios.
+
+Full hostapd functionality under Windows cannot be claimed because
+Ethernet/VLAN, hardware offload, FT-over-DS/RRB, and production radio behavior
+remain outside the demonstrated scope. Standard Windows-client discovery
+remains conditional: one cached-SSID diagnostic association succeeded, while
+the fresh-SSID matrix remained 0/6. The external Ubuntu AWUS036ACHM completed
+WPA2 M1–M4 with automatically enabled link acknowledgements and remained
+connected for 66.3 seconds until the timed AP shutdown. This verifies the
+tested Linux client and radio configuration, not universal interoperability
+or production-duration stability.

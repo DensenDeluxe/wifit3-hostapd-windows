@@ -4,8 +4,11 @@ from dataclasses import dataclass
 import secrets
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 
+import wifit3_bridge.wlan_interface_adapter as adapter
+from wifit3.chips.driver import FakeMacSupport
 from wifit3_bridge.bridge import Wifit3Bridge
 from wifit3_bridge.ccmp import ccmp_decrypt_mpdu, ccmp_encrypt_mpdu
 from wifit3_bridge.wlan_interface_adapter import (
@@ -114,6 +117,22 @@ class AdapterTests(unittest.TestCase):
         asyncio.run_coroutine_threadsafe(radio.close(), self.loop).result(timeout=2)
         self.assertFalse(self.iface.rx_acks_enabled)
         self.assertIsNone(self.iface.active_monitor_mac)
+
+    def test_hardware_ack_support_detection_requires_complete_public_api(self):
+        self.iface.driver = SimpleNamespace(FAKE_MAC=FakeMacSupport.SPOOFABLE)
+        self.assertTrue(adapter.hardware_ack_supported(self.iface))
+
+        class PartialInterface:
+            driver = SimpleNamespace(FAKE_MAC=FakeMacSupport.SPOOFABLE)
+            async def set_fake_mac(self, mac=None, bssid=None):
+                return True
+            async def enable_rx_acks(self):
+                return None
+
+        self.assertFalse(adapter.hardware_ack_supported(PartialInterface()))
+        self.iface.driver = SimpleNamespace(FAKE_MAC=FakeMacSupport.NONE)
+        self.assertFalse(adapter.hardware_ack_supported(self.iface))
+        self.assertFalse(adapter.hardware_ack_supported(object()))
 
     def test_beacon_software_tx_and_lease_loss(self):
         self.assertTrue(self.radio.set_frequency(2412))
@@ -499,6 +518,15 @@ class AdapterTests(unittest.TestCase):
         raw = (b'\x08\x41' + b'\x00'*22 + b'\xaa\xaa\x03\x00\x00\x00\x88\x8e' +
                b'\x01\x00\x00\x00')
         self.assertIsNone(extract_eapol_from_mpdu(raw))
+
+    def test_eapol_parser_accepts_dma_padding_before_llc(self):
+        sta = bytes.fromhex('0a1122334455')
+        ap = bytes.fromhex('021122334455')
+        payload = b'\x02\x03\x00\x00'
+        raw = (b'\x88\x01\x00\x00' + ap + sta + ap + b'\x00\x00' +
+               b'\x00\x00\x00\x00' + b'\xaa\xaa\x03\x00\x00\x00\x88\x8e' +
+               payload)
+        self.assertEqual(extract_eapol_from_mpdu(raw), (sta, payload))
 
     def test_optional_software_bip_protects_robust_management_for_mfp_station(self):
         from wifit3_bridge.bip import WPA_ALG_BIP_CMAC_128, bip_cmac_verify

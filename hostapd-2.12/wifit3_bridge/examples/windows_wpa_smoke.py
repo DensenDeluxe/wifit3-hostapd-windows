@@ -60,6 +60,7 @@ from wifit3_bridge.ft_client import (
 from wifit3_bridge.wlan_interface_adapter import (
     Wifit3InterfaceRadio,
     bridge_config_for_interface,
+    hardware_ack_supported,
 )
 
 PMF_RSN_IE = GENERIC_RSN_IE[:-2] + b"\xc0\x00"
@@ -740,7 +741,7 @@ async def run(args: argparse.Namespace) -> int:
         software_gcmp=args.gcmp,
         software_gcmp256=args.gcmp256,
         software_tkip=args.tkip,
-        hardware_ack=args.hardware_ack,
+        hardware_ack=args.hardware_ack or hardware_ack_supported(iface),
     )
 
     def record_ap_tx(frame: bytes) -> None:
@@ -970,9 +971,14 @@ async def run(args: argparse.Namespace) -> int:
                 process.wait(timeout=3)
 
     try:
-        if args.hardware_ack and not await radio.arm_hardware_ack():
-            print("hardware_ack_armed=False")
-            return 1
+        if radio.hardware_ack:
+            if not await radio.arm_hardware_ack():
+                print("hardware_ack_armed=False")
+                if args.hardware_ack:
+                    return 1
+                radio.hardware_ack = False
+            else:
+                print("hardware_ack_armed=True")
         with tempfile.TemporaryDirectory(prefix="wifit3-hostapd-") as directory:
             directory = Path(directory)
             if sim_db_server is not None:
@@ -1864,7 +1870,7 @@ async def run(args: argparse.Namespace) -> int:
                 print("sae_pk=True")
             if args.sae_ext_key:
                 print("sae_ext_key=True")
-            if args.hardware_ack:
+            if radio.hardware_ack:
                 print(f"hardware_ack_armed={radio._hardware_ack_armed}")
                 print(f"hardware_ack_tx_count={radio.hardware_ack_tx_count}")
             if args.ota:
@@ -2044,7 +2050,7 @@ def main() -> int:
     parser.add_argument("--tkip", action="store_true",
                         help="WPA2-TKIP-AP-Startup/Control-Smoke mit Software-Capability testen")
     parser.add_argument("--hardware-ack", action="store_true",
-                        help="öffentliche wifit3 Active-Monitor-/Link-ACK-API opt-in testen")
+                        help="require active-monitor link acknowledgements; supported adapters enable them automatically")
     parser.add_argument("--control-smoke", action="store_true",
                         help="UDP-Control-Interface mit hostapd_cli testen")
     parser.add_argument("--station-smoke", action="store_true",
