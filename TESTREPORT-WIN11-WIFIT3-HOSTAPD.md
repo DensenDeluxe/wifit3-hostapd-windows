@@ -25,6 +25,11 @@ establish complete production hostapd parity. Ethernet, VLAN, FT-over-DS/RRB,
 hardware station offload, hardware key offload, and production radio timing
 are not included in the acceptance claim.
 
+An external Ubuntu client using the AWUS036ACHM reached beacon discovery,
+authentication, and association against the Windows AP. The WPA2 four-way
+handshake did not complete because the client-side M2 was not observed; the
+Linux-client run is therefore classified as partial interoperability evidence.
+
 ## 1. Objective and scope
 
 The objective was to determine whether the modified hostapd build can execute
@@ -40,7 +45,8 @@ The following were in scope:
 - software WPA key installation and protected EAPOL handling;
 - WPA2-Personal, WPA3-SAE, PMF/BIP, and selected 802.11r paths;
 - RADIUS/EAP authentication and accounting transport;
-- controlled OTA client tests using a second wifit3 observer radio.
+- controlled OTA client tests using a second wifit3 observer radio;
+- standard-client interoperability using a native Linux WLAN stack.
 
 Ethernet data-plane bridging and VLAN integration were deliberately excluded.
 
@@ -340,7 +346,42 @@ and repeatable Windows-client association are not verified on this system.
 The result is classified as a management/discovery interoperability limitation,
 not as a failure of the previously verified raw-observer WPA and EAP matrices.
 
-## 9. Management, accounting, and RADIUS evidence
+## 9. Native Linux client interoperability
+
+The Ubuntu client was an external Linux host connected through Ethernet for
+control access. The tested WLAN device was an Alfa AWUS036ACHM with MediaTek
+MT7610U chipset, USB identifier `0e8d:7610`, and the native Linux `mt76x0u`
+driver. The Windows AP used radio index 0 (MT7925AU / Netgear A9000), channel 1,
+WPA2-Personal with CCMP, and a temporary SSID and passphrase. No Ethernet
+bridge, VLAN, or IP data-plane path was included.
+
+The client was tested with the native Linux `iw` scan path and a direct
+`wpa_supplicant` control path. NetworkManager was not used as acceptance
+evidence because the non-interactive SSH test session could not provide its
+secret-agent transaction reliably.
+
+| Test criterion | Result | Evidence |
+|---|---:|---|
+| Beacon and SSID discovery | PASS | `iw` scan returned the temporary SSID and RSN parameters |
+| Authentication exchange | PASS | hostapd recorded authentication for the Linux station |
+| Association exchange | PASS | hostapd recorded successful association |
+| WPA four-way handshake | FAIL | hostapd transmitted repeated M1 frames; M2 was not observed |
+| Authorized port state | FAIL | no completed four-way handshake or authorized station state |
+| IP/data-plane connectivity | NOT TESTED | no authorized port; Ethernet and VLAN were out of scope |
+| Fatal hostapd process failure | PASS | no fatal process termination occurred during the run |
+
+The run demonstrates interoperability through beacon discovery, open-system
+authentication, and association. It does not demonstrate WPA2 client
+interoperability because the exchange stopped after the AP-side M1. The
+observed failure boundary is therefore between association completion and
+receipt of the client-side WPA M2. Additional packet-level capture of both
+directions is required to distinguish client reception, EAPOL delivery, and
+raw-radio transmission timing as the limiting factor.
+
+After testing, the Linux NetworkManager state, temporary profiles, temporary
+control directory, and wifit3 MT7610U module reservation were restored.
+
+## 10. Management, accounting, and RADIUS evidence
 
 The bridge regression covers station creation, flag updates, authorization,
 removal, management TX, deauthentication, disassociation, station counters,
@@ -353,7 +394,7 @@ observed through the asynchronous Windows event-loop drain and returned
 positive station counters and inactivity data. This is a software observation
 path; it is not hardware counter or Ethernet accounting evidence.
 
-## 10. Capability classification
+## 11. Capability classification
 
 The verified result is divided into three categories:
 
@@ -367,7 +408,7 @@ raw-radio, authentication, key, and management criteria.
 
 The full list is maintained in `hostapd-2.12/PORT_STATUS.md`.
 
-## 11. Limitations
+## 12. Limitations
 
 The wifit3 API provides raw TX/RX and control callbacks but does not provide a
 complete Windows AP hardware abstraction for TBTT scheduling, station
@@ -393,7 +434,7 @@ establish arbitrary adapter pairing stability, regulatory-domain coverage,
 throughput, power-save behavior, DFS, EHT, production service lifetime, or
 interoperability with every external client implementation.
 
-## 12. Conclusion
+## 13. Conclusion
 
 The modified hostapd 2.12 build functions on the specified Windows 11 system
 over wifit3 for the experimentally verified AP, station, WPA, PMF, RADIUS, and
@@ -404,3 +445,6 @@ under Windows cannot be claimed because Ethernet/VLAN, hardware offload,
 FT-over-DS/RRB, and production radio behavior remain outside the demonstrated
 scope. Standard Windows-client discovery remains conditional: one cached-SSID
 diagnostic association succeeded, whereas the fresh-SSID matrix remained 0/6.
+The external Ubuntu client passed discovery, authentication, and association
+but did not complete the WPA2 four-way handshake; full external-client
+interoperability therefore remains unverified.
